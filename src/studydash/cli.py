@@ -589,21 +589,40 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    """环境自检。
+
+    分三档：``ok`` / ``warn`` / ``fail``，**只有 fail 才让退出码非 0**。
+    「还没建 config.json」这类是全新检出的正常状态，不是故障——doctor 如果因此
+    报错，就没法拿来当 CI 门禁，用户第一次跑也会以为装坏了。
+    """
     ctx = Ctx(args)
     ws = ctx.workspace
     checks: list[dict[str, Any]] = []
 
-    def check(name: str, ok: bool, detail: str, fix: str = "") -> None:
-        checks.append({"name": name, "ok": ok, "detail": detail, "fix": fix})
+    def check(name: str, ok: bool, detail: str, fix: str = "", *, level: str = "") -> None:
+        # level 显式给出时以它为准；否则按 ok 折叠成 ok / fail
+        lvl = level or ("ok" if ok else "fail")
+        checks.append(
+            {"name": name, "ok": lvl != "fail", "level": lvl, "detail": detail, "fix": fix}
+        )
 
     check("Python 版本", sys.version_info >= (3, 10), f"{sys.version.split()[0]}（需要 ≥3.10）")
-    check("工作区", ws.root.exists(), str(ws.root))
-    check(
-        "配置文件",
-        ws.config_path.exists(),
-        str(ws.config_path),
-        "跑 `studydash init`",
-    )
+
+    if ws.root.exists():
+        check("工作区", True, str(ws.root))
+    else:
+        check("工作区", True, f"{ws.root}（还不存在，首次运行时会自动创建）", level="warn")
+
+    if ws.config_path.exists():
+        check("配置文件", True, str(ws.config_path))
+    else:
+        check(
+            "配置文件",
+            True,
+            f"{ws.config_path} 还没创建",
+            "跑 `studydash init` 生成；只看 `studydash demo` 的话不需要它",
+            level="warn",
+        )
 
     from . import http as _http
 
@@ -636,6 +655,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             True,
             "、".join(unverified) + " 尚未用真实账号验证过",
             "取不到数据属正常，跑 `studydash probe <平台>` 留档后提 issue",
+            level="warn",
         )
 
     if ws.config_path.exists():
@@ -643,23 +663,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         with_cookie = [a for a in accounts if a.cookie]
         check(
             "账号配置",
-            bool(accounts),
+            True,
             f"启用 {len(accounts)} 个，其中 {len(with_cookie)} 个填了 Cookie",
             "编辑配置文件的 cookie 字段" if not with_cookie else "",
+            level="ok" if with_cookie else "warn",
         )
 
+    failed = [c["name"] for c in checks if c["level"] == "fail"]
     if args.json:
         print(json.dumps(checks, ensure_ascii=False, indent=2))
-        return 0 if all(c["ok"] for c in checks) else 1
+        return 1 if failed else 0
 
+    marks = {"ok": "✓", "warn": "!", "fail": "×"}
     ctx.log.info("")
     for item in checks:
-        mark = "✓" if item["ok"] else "×"
-        ctx.log.info(f"  {mark} {item['name']}：{item['detail']}")
-        if not item["ok"] and item["fix"]:
+        ctx.log.info(f"  {marks[item['level']]} {item['name']}：{item['detail']}")
+        if item["level"] != "ok" and item["fix"]:
             ctx.log.info(f"      → {item['fix']}")
     ctx.log.info("")
-    return 0 if all(c["ok"] for c in checks) else 1
+    if failed:
+        ctx.log.warn(f"有 {len(failed)} 项没通过：" + "、".join(failed))
+    return 1 if failed else 0
 
 
 def cmd_version(args: argparse.Namespace) -> int:

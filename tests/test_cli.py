@@ -169,15 +169,49 @@ def test_init_refuses_to_clobber_without_force(home):
     assert run("--home", home, "init", "--force") == 0
 
 
-def test_doctor_runs_and_exits_cleanly(home, capsys):
-    assert run("--home", home, "doctor") in (0, 1)
-    assert "studydash" in capsys.readouterr().out
+def test_doctor_is_clean_on_a_fresh_workspace(home, capsys):
+    """全新检出（还没 config.json）不是故障：``doctor`` 必须退出 0。
 
+    这条以前写成 ``in (0, 1)``，松到看不出问题——于是 CI 拿它当门禁时，
+    干净检出上永远红，而真正的坏掉（只读约束被绕过）和「还没建配置」混在一起。
+    """
+    from pathlib import Path
 
-def test_doctor_json(home, capsys):
-    run("--home", home, "doctor", "--json")
+    assert run("--home", home, "doctor") == 0
     out = capsys.readouterr().out
-    assert json.loads(out)
+    assert "配置文件" in out
+    assert "还没创建" in out
+    # 自检是只读的，不该顺手创建任何东西
+    assert not (Path(home) / "config.json").exists()
+
+
+def test_doctor_marks_missing_config_as_a_warning_not_a_failure(home, capsys):
+    assert run("--home", home, "doctor", "--json") == 0
+    data = json.loads(capsys.readouterr().out)
+    by_name = {item["name"]: item for item in data}
+
+    assert by_name["配置文件"]["level"] == "warn"
+    assert by_name["配置文件"]["ok"] is True
+    assert by_name["Python 版本"]["level"] == "ok"
+    assert all(item["ok"] for item in data), "干净检出上不该有任何 fail"
+
+
+def test_doctor_fails_when_the_readonly_contract_is_broken(home, monkeypatch, capsys):
+    """真的坏掉时必须非 0——否则这个门禁没有意义。"""
+    from studydash import http as http_mod
+
+    monkeypatch.setattr(
+        http_mod, "assert_readonly", lambda paths=None: ["src/studydash/oops.py"]
+    )
+    assert run("--home", home, "doctor") == 1
+    out = capsys.readouterr().out
+    assert "只读约束" in out
+    assert "oops.py" in out
+
+
+def test_doctor_json_is_parseable_alongside_text_mode(home, capsys):
+    run("--home", home, "doctor", "--json")
+    assert json.loads(capsys.readouterr().out)
 
 
 # --------------------------------------------------------------------------- #

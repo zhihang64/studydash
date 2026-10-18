@@ -1,16 +1,47 @@
 name: build-exe
 
-# 打 v* 标签自动出包并挂到对应 Release；也可手动触发只出 artifact。
+# 每次推到 main / 提 PR 都跑测试；打 v* 标签额外出包并挂到对应 Release；
+# 手动触发（workflow_dispatch）只出 artifact，不发 Release。
 on:
   push:
+    branches: [main]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  windows:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装测试依赖
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: 跑测试
+        env:
+          PYTHONPATH: src
+          PYTHONUTF8: '1'
+        run: python -m pytest -q
+
+      - name: 只读承诺自检
+        # doctor 会扫源码，确认除 http.py 外没有别的地方私自联网
+        env:
+          PYTHONPATH: src
+          PYTHONUTF8: '1'
+        run: |
+          python -m studydash doctor
+          if ($LASTEXITCODE -ne 0) { throw "doctor 自检未通过（退出码 $LASTEXITCODE）" }
+
+  package:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,32 +55,63 @@ jobs:
 
       - name: 打包
         # 脚本内部用 $PSScriptRoot 定位路径，所以在哪跑都一样；
-        # 它会打印体积、SHA256 和 exe 的版本资源。
+        # 它会从 src/studydash/__init__.py 读版本号、渲染版本资源，
+        # 最后打印体积、SHA256 和 exe 的版本资源。
         run: pwsh -File tools/build_exe.ps1
 
-      - name: 冒烟测试（干净目录里跑一键模式）
+      - name: 冒烟测试（干净目录里跑，不联网）
         shell: pwsh
         run: |
           $t = Join-Path $env:RUNNER_TEMP 'smoke'
           New-Item -ItemType Directory -Path $t -Force | Out-Null
-          Copy-Item dist\*.exe $t
+          Copy-Item dist\studydash\* $t -Recurse -Force
           Push-Location $t
-          & ".\$((Get-ChildItem *.exe).Name)" --no-open
-          if (-not (Test-Path 'out\dashboard.html')) { throw '没有生成 out\dashboard.html' }
-          if ((Get-Item 'out\dashboard.html').Length -lt 20000) { throw '生成的 HTML 太小，疑似渲染失败' }
-          "冒烟测试通过：$((Get-Item 'out\dashboard.html').Length) 字节"
-          Pop-Location
+          try {
+            $exe = Join-Path $t 'studydash.exe'
+            if (-not (Test-Path $exe)) { throw "没找到 $exe" }
+
+            # 1) 平台注册表：内置适配器都得在
+            $pf = & $exe platforms --json | ConvertFrom-Json
+            if ($pf.Count -lt 5) { throw "只装载了 $($pf.Count) 个适配器，预期 ≥5" }
+            "适配器：$($pf.id -join ', ')"
+
+            # 2) 一键渲染：demo 数据 → payload → HTML
+            & $exe demo --save
+            if ($LASTEXITCODE -ne 0) { throw "demo --save 退出码 $LASTEXITCODE" }
+            & $exe build
+            if ($LASTEXITCODE -ne 0) { throw "build 退出码 $LASTEXITCODE" }
+
+            if (-not (Test-Path 'out\dashboard.html')) { throw '没有生成 out/dashboard.html' }
+            $len = (Get-Item 'out\dashboard.html').Length
+            if ($len -lt 20000) { throw "生成的 HTML 只有 $len 字节，疑似渲染失败" }
+            "冒烟测试通过：out\dashboard.html $len 字节"
+
+            # 3) 崩溃日志不该出现
+            if (Test-Path 'crash.log') { throw "出现了 crash.log：`n$(Get-Content crash.log -Raw)" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: 打 onedir 压缩包
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\studydash\* -DestinationPath dist\studydash-onedir.zip -Force
+          Get-Item dist\studydash-onedir.zip | ForEach-Object { "onedir 压缩包 $([math]::Round($_.Length/1MB,2)) MB" }
 
       - name: 上传 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: study-dashboard-exe
-          path: dist/*.exe
+          name: studydash-exe
+          path: |
+            dist/studydash.exe
+            dist/studydash-onedir.zip
           if-no-files-found: error
 
       - name: 挂到 Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.exe
+          files: |
+            dist/studydash.exe
+            dist/studydash-onedir.zip
           fail_on_unmatched_files: true

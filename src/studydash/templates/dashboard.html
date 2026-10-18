@@ -411,6 +411,8 @@ h2::before {
 }
 .pct { font-size: 22px; font-weight: 720; letter-spacing: -.6px; flex: none; }
 .pct small { font-size: 12px; font-weight: 560; color: var(--muted); }
+/* 「无数据」不是 0%，别用 22px 大号数字吓人 */
+.pct small.nodata { font-size: 13px; font-weight: 620; letter-spacing: 0; }
 
 .cats { display: flex; flex-direction: column; gap: 7px; }
 .cat {
@@ -846,6 +848,8 @@ footer.site p { margin: 0 0 8px; line-height: 1.7; }
       color: cssColor(p.color, '#4f46e5'),
       courses: num(p.courses, 0),
       avg_progress: pct01(p.avg_progress),
+      /* 平台下所有课都没取到数据时，后端给 has_data:false——0% 会误导成「一门课都没上」 */
+      hasData: p.has_data !== false,
       pending: num(p.pending, 0),
       overdue: num(p.overdue, 0),
       ok: p.ok !== false,
@@ -934,6 +938,9 @@ footer.site p { margin: 0 0 8px; line-height: 1.7; }
       term: notesc(c.term),
       url: safeUrl(c.url),
       progress: pct01(c.progress),
+      /* 后端可能给 has_data:false，表示这门课既没有进度条也没有作业——
+         是「取不到数据」，不是「进度 0%」。老数据没有这个字段，默认当作有数据。 */
+      hasData: c.has_data !== false,
       parts: parts,
       pending: num(c.pending, 0),
       overdue: num(c.overdue, 0),
@@ -1110,11 +1117,18 @@ footer.site p { margin: 0 0 8px; line-height: 1.7; }
       label: '涉及平台', value: String(nPlatforms), unit: '个',
       hint: platformList.map(function (p) { return p.short; }).slice(0, 3).join(' · ') || '—'
     }));
-    host.appendChild(kpi({
-      label: '平均进度', value: String(r1(avg * 100)), unit: '%',
-      hint: done ? '已完成 ' + done + ' 项' : '还没有已完成的记录',
-      bar: avg * 100
-    }));
+    host.appendChild(kpi(
+      (OV.has_progress === false && nCourses > 0)
+        ? {
+            label: '平均进度', value: '—',
+            hint: '数据源没有给出任何进度信息'
+          }
+        : {
+            label: '平均进度', value: String(r1(avg * 100)), unit: '%',
+            hint: done ? '已完成 ' + done + ' 项' : '还没有已完成的记录',
+            bar: avg * 100
+          }
+    ));
     host.appendChild(kpi({
       label: '待办', value: String(pending), unit: '项',
       hint: pending ? '已逾期 ' + overdue + ' 项 · ' + alertDays + ' 天内 ' + dueSoon + ' 项'
@@ -1161,17 +1175,22 @@ footer.site p { margin: 0 0 8px; line-height: 1.7; }
         ]),
         el('div', { class: 'pf-stats' }, [
           el('span', null, [el('b', { text: String(p.courses) }), document.createTextNode(' 门课')]),
-          el('span', null, [el('b', { text: String(r1(rawPct(p.avg_progress))) + '%' }), document.createTextNode(' 平均')]),
+          p.hasData
+            ? el('span', null, [el('b', { text: String(r1(rawPct(p.avg_progress))) + '%' }), document.createTextNode(' 平均')])
+            : el('span', { title: '该平台下的课程都没有可用于计算进度的数据' },
+                [el('b', { text: '无数据' })]),
           el('span', null, [el('b', { text: String(p.pending) }), document.createTextNode(' 待办')]),
           el('span', { class: p.overdue ? 'neg' : '' },
             [el('b', { text: String(p.overdue) }), document.createTextNode(' 逾期')])
         ]),
-        el('div', {
-          class: 'bar is-thin', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
-          'aria-valuenow': String(r1(rawPct(p.avg_progress))),
-          'aria-label': p.name + ' 平均进度 ' + r1(rawPct(p.avg_progress)) + '%'
-        }, [el('i', { style: 'width:' + rawPct(p.avg_progress) + '%' })])
-      ];
+        p.hasData
+          ? el('div', {
+              class: 'bar is-thin', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
+              'aria-valuenow': String(r1(rawPct(p.avg_progress))),
+              'aria-label': p.name + ' 平均进度 ' + r1(rawPct(p.avg_progress)) + '%'
+            }, [el('i', { style: 'width:' + rawPct(p.avg_progress) + '%' })])
+          : null
+      ].filter(Boolean);
       if (!p.ok) {
         kids.push(el('div', { class: 'pf-msg' }, [
           svgUse('ic-alert'),
@@ -1448,19 +1467,26 @@ footer.site p { margin: 0 0 8px; line-height: 1.7; }
           text: [c.teacher, c.term].filter(Boolean).join(' · ') || '教师 / 学期未提供'
         })
       ]),
-      el('div', { class: 'pct' }, [
-        document.createTextNode(String(r1(rawPct(c.progress)))),
-        el('small', { text: '%' })
-      ])
+      el('div', { class: 'pct' }, c.hasData
+        ? [
+            document.createTextNode(String(r1(rawPct(c.progress)))),
+            el('small', { text: '%' })
+          ]
+        : [
+            el('small', {
+              class: 'nodata',
+              title: '适配器没取到这门课的进度或作业数据，不代表进度为 0',
+              text: '无数据'
+            })
+          ])
     ]);
 
     var badges = el('div', { class: 'badges' }, [
       el('span', { class: 'badge plat', style: '--pf-color:' + c.platform.color, title: c.platform.name },
         [el('span', { class: 'cdot' }), document.createTextNode(c.platform.short)]),
-      el('span', {
-        class: 'badge ok',
-        text: '进度 ' + r1(rawPct(c.progress)) + '%'
-      })
+      c.hasData
+        ? el('span', { class: 'badge ok', text: '进度 ' + r1(rawPct(c.progress)) + '%' })
+        : el('span', { class: 'badge plain', title: '该课程没有可用于计算进度的数据', text: '无进度数据' })
     ]);
     if (c.overdue) badges.appendChild(el('span', { class: 'badge danger', text: '逾期 ' + c.overdue + ' 项' }));
     if (c.pending) badges.appendChild(el('span', { class: 'badge warn', text: '待办 ' + c.pending + ' 项' }));
@@ -1468,12 +1494,14 @@ footer.site p { margin: 0 0 8px; line-height: 1.7; }
 
     var kids = [head, badges];
 
-    /* 总进度条 */
-    kids.push(el('div', {
-      class: 'bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
-      'aria-valuenow': String(r1(rawPct(c.progress))),
-      'aria-label': c.name + ' 总进度 ' + r1(rawPct(c.progress)) + '%'
-    }, [el('i', { style: 'width:' + clampPct(rawPct(c.progress)) + '%' })]));
+    /* 总进度条：无数据的课程不画，画一条 0% 的空条等于在说「你什么都没做」 */
+    if (c.hasData) {
+      kids.push(el('div', {
+        class: 'bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
+        'aria-valuenow': String(r1(rawPct(c.progress))),
+        'aria-label': c.name + ' 总进度 ' + r1(rawPct(c.progress)) + '%'
+      }, [el('i', { style: 'width:' + clampPct(rawPct(c.progress)) + '%' })]));
+    }
 
     /* 细分进度 */
     if (c.parts.length) {
@@ -1490,7 +1518,9 @@ footer.site p { margin: 0 0 8px; line-height: 1.7; }
       })));
     } else {
       kids.push(el('p', { style: 'margin:0;font-size:12.5px;color:var(--faint)',
-        text: '该课程没有细分进度数据，仅提供总进度。' }));
+        text: c.hasData
+          ? '该课程没有细分进度数据，仅提供总进度。'
+          : '适配器没有取到这门课的进度或作业数据。' }));
     }
 
     /* 关键事实 */

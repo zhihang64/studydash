@@ -210,6 +210,8 @@ def build_payload(
         "courses": len(courses),
         "platforms": len({c.platform for c in courses}),
         "avg_progress": round(sum(ratios) / len(ratios), 4) if ratios else 0.0,
+        # 一门课都没进度数据时，avg_progress 的 0.0 不是「平均 0%」而是「没得平均」
+        "has_progress": bool(ratios),
         "pending": pending,
         "overdue": overdue,
         "due_soon": due_soon,
@@ -247,6 +249,10 @@ def _sort_courses(courses: list[Course]) -> list[Course]:
 
 def _course_card(course: Course, ref: datetime) -> dict[str, Any]:
     data = course.to_dict(ref=ref)
+    # ``Course.ratio`` 在「没有任何进度和作业」时退化成 0.0，但那门课并不是「进度 0%」，
+    # 而是「适配器没取到数据」。两者在界面上必须能分开，否则用户会以为自己一节课没上。
+    # overview.avg_progress 早就把这类课排除在外了（见上面的 ratios），这里补上卡片侧。
+    data["has_data"] = bool(course.progress or course.assignments)
     # 每门课单独算一次「当前最扎眼的状态」，前端不用自己推导
     states = [a.state for a in course.assignments]
     if "overdue" in states:
@@ -291,6 +297,8 @@ def _platform_cards(courses: list[Course], accounts: list[Account]) -> list[dict
                 "note": meta.note if meta else "",
                 "courses": len(items),
                 "avg_progress": round(sum(ratios) / len(ratios), 4) if ratios else 0.0,
+                # 平台下所有课都没数据时，0.0 不是「平均 0%」而是「无可平均的东西」
+                "has_data": bool(ratios),
                 "pending": sum(
                     1 for c in items for a in c.assignments
                     if a.state in {"overdue", "urgent", "soon", "later", "none"}

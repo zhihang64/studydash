@@ -225,3 +225,72 @@ def test_summary_lines_mention_the_important_stuff(two_courses, config):
 def test_summary_lines_survive_an_empty_payload(config):
     lines = summary_lines(build_payload([], [], config))
     assert any("0 门课" in line for line in lines)
+
+
+# --------------------------------------------------------------------------- #
+# 「没数据」与「进度 0%」必须分得开
+# --------------------------------------------------------------------------- #
+
+def test_course_without_any_data_is_flagged_not_shown_as_zero(config):
+    """没进度条也没作业的课程，是「适配器没取到数据」，不是「你一节课没上」。
+
+    ``Course.ratio`` 在这时会退化成 0.0，前端如果照直画就是一条 0% 的空进度条，
+    用户会以为自己的学习状态出了问题。所以 payload 里带一个 ``has_data``，
+    卡片据此显示「无数据」。
+    """
+    courses = [
+        make_course("c1", name="有数据", platform="chaoxing",
+                    progress=[Progress("任务点", 3, 4)]),
+        make_course("c2", name="没数据", platform="chaoxing",
+                    progress=[], assignments=[]),
+    ]
+    payload = build_payload(courses, [], config)
+    by_id = {c["id"]: c for c in payload["courses"]}
+
+    assert by_id["c1"]["has_data"] is True
+    assert by_id["c2"]["has_data"] is False
+    # 没数据的课其 ratio 仍是 0.0（模型层行为，前端靠 has_data 才能区分）
+    assert by_id["c2"]["progress"] == 0.0
+    # 也不能把平均进度拉下来
+    assert payload["overview"]["avg_progress"] == pytest.approx(0.75, abs=1e-3)
+    assert payload["overview"]["has_progress"] is True
+
+
+def test_platform_card_without_any_data_says_so(config):
+    """平台上所有课都没数据时，不能报「平均 0%」。"""
+    courses = [
+        make_course("c1", name="有数据", platform="chaoxing",
+                    progress=[Progress("任务点", 1, 2)]),
+        make_course("c2", name="没数据", platform="manual", progress=[], assignments=[]),
+    ]
+    payload = build_payload(courses, [], config)
+    cards = {p["id"]: p for p in payload["platforms"]}
+
+    assert cards["chaoxing"]["has_data"] is True
+    assert cards["chaoxing"]["avg_progress"] == pytest.approx(0.5, abs=1e-3)
+    assert cards["manual"]["has_data"] is False
+    assert cards["manual"]["avg_progress"] == 0.0
+
+
+def test_overview_marks_a_total_lack_of_progress_data(config):
+    """全部课程都没进度数据时，平均进度是「没得平均」而不是 0%。"""
+    courses = [
+        make_course("c1", platform="manual", progress=[], assignments=[]),
+        make_course("c2", platform="manual", progress=[], assignments=[]),
+    ]
+    payload = build_payload(courses, [], config)
+    assert payload["overview"]["has_progress"] is False
+    assert payload["overview"]["avg_progress"] == 0.0
+    # 课还是 2 门——有课没进度不等于没课
+    assert payload["overview"]["courses"] == 2
+
+
+def test_course_with_only_assignments_counts_as_having_data(config):
+    """只有作业没进度条也算有数据——作业完成率就是它的进度来源。"""
+    courses = [
+        make_course("c1", platform="chaoxing", progress=[],
+                    assignments=[make_assignment("a1", title="论文提纲", status="graded")]),
+    ]
+    payload = build_payload(courses, [], config)
+    assert payload["courses"][0]["has_data"] is True
+    assert payload["overview"]["avg_progress"] == pytest.approx(1.0, abs=1e-3)
