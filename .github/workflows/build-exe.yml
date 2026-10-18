@@ -1,0 +1,55 @@
+name: build-exe
+
+# 打 v* 标签自动出包并挂到对应 Release；也可手动触发只出 artifact。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装打包依赖
+        run: python -m pip install --disable-pip-version-check pillow pyinstaller
+
+      - name: 打包
+        # 脚本内部用 $PSScriptRoot 定位路径，所以在哪跑都一样；
+        # 它会打印体积、SHA256 和 exe 的版本资源。
+        run: pwsh -File tools/build_exe.ps1
+
+      - name: 冒烟测试（干净目录里跑一键模式）
+        shell: pwsh
+        run: |
+          $t = Join-Path $env:RUNNER_TEMP 'smoke'
+          New-Item -ItemType Directory -Path $t -Force | Out-Null
+          Copy-Item dist\*.exe $t
+          Push-Location $t
+          & ".\$((Get-ChildItem *.exe).Name)" --no-open
+          if (-not (Test-Path 'out\dashboard.html')) { throw '没有生成 out\dashboard.html' }
+          if ((Get-Item 'out\dashboard.html').Length -lt 20000) { throw '生成的 HTML 太小，疑似渲染失败' }
+          "冒烟测试通过：$((Get-Item 'out\dashboard.html').Length) 字节"
+          Pop-Location
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: study-dashboard-exe
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: 挂到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          fail_on_unmatched_files: true
