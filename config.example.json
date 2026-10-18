@@ -1,13 +1,25 @@
 {
-  "cookie": "把浏览器里登录后的完整 Cookie 串粘到这里，形如：_uid=1234567; _d=...; UID=...; vc3=...;",
-  "timeout": 15,
-  "term": {
-    "name": "2025-2026 学年 第一学期",
-    "start": "2025-09-01T00:00:00+08:00",
-    "end": "2026-01-18T23:59:59+08:00"
+  "$schema": "./config.schema.json",
+  "schema_version": 2,
+  "http": {
+    "timeout": 8.0,
+    "delay": 0.4,
+    "retries": 2,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
   },
-  "endpoints": {
-    "login_check": "https://i.chaoxing.com/base/settings",
-    "course_list": "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courses/list?rss=1&start=0&size=500&catalogId=0&searchname="
-  }
+  "ui": {
+    "alert_days": 3.0,
+    "theme": "auto"
+  },
+  "accounts": [
+    {
+      "platform": "chaoxing",
+      "label": "我的超星账号",
+      "enabled": true,
+      "cookie": "把浏览器里登录后的完整 Cookie 串粘到这里，形如：_uid=1234567; _d=...; UID=...; vc3=...;",
+      "options": {
+        "chapters": false
+      }
+    }
+  ]
 }
