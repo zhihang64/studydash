@@ -44,12 +44,15 @@
 
 ### 方式一：下载 exe（不用装 Python）
 
-从 [Releases](../../releases) 下载：
+从 [Releases](../../releases) 下载，**两个包选一个就行**：
 
 | 产物 | 说明 |
 | --- | --- |
-| `studydash-vX.Y.Z.exe` | 单文件版，下载即用，约 9 MB |
-| `studydash-vX.Y.Z-onedir.zip` | 文件夹版，解压后用，启动更快、更不容易被杀软误报 |
+| `studydash.exe` | 单文件版，下载即用，约 9 MB。首次启动要解包，慢几秒 |
+| `studydash-onedir.zip` | 文件夹版，解压后用里面的 `studydash.exe`，启动更快、更不容易被杀软误报 |
+
+> 想固定一个下载链接，用 [最新版直链](../../releases/latest)，文件名不带版本号，所以
+> `…/releases/latest/download/studydash.exe` 一直有效。
 
 放进一个空文件夹**双击**即可：挑数据源 → 渲染 → 用默认浏览器打开看板，并在同目录生成：
 
