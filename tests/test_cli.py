@@ -7,6 +7,7 @@ CLI 是用户真正接触的那一层，所以这里检查的是「命令跑完�
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -212,6 +213,53 @@ def test_doctor_fails_when_the_readonly_contract_is_broken(home, monkeypatch, ca
 def test_doctor_json_is_parseable_alongside_text_mode(home, capsys):
     run("--home", home, "doctor", "--json")
     assert json.loads(capsys.readouterr().out)
+
+
+# --------------------------------------------------------------------------- #
+# 控制台编码
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(os.name != "nt", reason="控制台编码处理只在 Windows 上生效")
+def test_setup_console_forces_utf8_on_redirected_output(monkeypatch):
+    """管道 / 重定向时也得吐 UTF-8。
+
+    Windows 上 Python 的 stdout 默认跟着本机 ANSI 代码页（简中 GBK），于是
+    `studydash doctor --json | jq` 拿到的是 GBK 字节、解析直接失败；重定向到
+    文件写出来的也不是 UTF-8。所以这里不区分是不是真控制台，一律对齐 UTF-8。
+    """
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def isatty(self):
+            return False
+
+        def reconfigure(self, **kwargs):
+            self.calls.append(kwargs)
+
+    out, err = Recorder(), Recorder()
+    monkeypatch.setattr(cli.sys, "stdout", out)
+    monkeypatch.setattr(cli.sys, "stderr", err)
+
+    cli._setup_console()
+
+    assert out.calls == [{"encoding": "utf-8", "errors": "replace"}]
+    assert err.calls == [{"encoding": "utf-8", "errors": "replace"}]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="控制台编码处理只在 Windows 上生效")
+def test_setup_console_tolerates_streams_without_reconfigure(monkeypatch):
+    """pytest / IDE 会把 sys.stdout 换成没有 reconfigure 的对象，别在这儿炸。"""
+
+    class Bare:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdout", Bare())
+    monkeypatch.setattr(cli.sys, "stderr", None)
+
+    cli._setup_console()          # 不抛就算过
 
 
 # --------------------------------------------------------------------------- #

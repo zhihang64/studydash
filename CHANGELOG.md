@@ -102,4 +102,4 @@
   截止时间线需要在 `config.json` 的 `deadlines` 里手工登记。
 
 [2.0.0]: https://github.com/zhihang64/studydash/releases/tag/v2.0.0
-[1.0.0]: https://github.com/zhihang64/chaoxing-dashboard/releases/tag/v1.0.0
+[1.0.0]: https://github.com/zhihang64/studydash/releases/tag/v1.0.0

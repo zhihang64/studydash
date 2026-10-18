@@ -871,29 +871,34 @@ def _message_box(title: str, message: str) -> None:
 
 
 def _setup_console() -> None:
-    """让中文在 GBK 控制台里也打得出来。
+    """让中文在 Windows 的任何输出目标上都打得出来。
 
-    Windows 控制台默认用本机 ANSI 代码页（简中是 936/GBK）。Python 3.13 之前
-    stdout 会跟着这个代码页走，于是「①/·/✓」这类字符要么变问号要么直接抛
-    UnicodeEncodeError —— 后者会让程序在黑框里一闪就退，正是「双击没反应」的
-    常见成因之一。所以：
+    Windows 控制台默认用本机 ANSI 代码页（简中是 936/GBK），Python 的 stdout
+    跟着它走，于是「✓/·/▸」这类字符要么变问号要么直接抛 UnicodeEncodeError
+    ——后者会让程序在黑框里一闪就退，正是「双击没反应」的常见成因之一。
 
-    * 打包运行时一律把 stdio 对齐到 UTF-8（管道/重定向场景一步到位）；
-    * 连着真控制台时再把输出代码页也切成 65001，控制台才认得 UTF-8 字节；
-    * 源码运行时如果用户在 UTF-8 终端里也不需要额外动作，故不动。
+    三种情况都统一对齐到 UTF-8：
+
+    * **连着真控制台**：顺手把输出代码页切成 65001，控制台才认得这些字节；
+    * **管道 / 重定向**：consumer 无从协商编码，而本项目自己的 JSON、模板、
+      配置全是 UTF-8，所以跟着 UTF-8 走 —— 否则 `studydash doctor --json | jq`
+      拿到的 GBK 字节会直接解析失败；
+    * **打包运行**：同上，另外 exe 可能被别的程序带着管道启动。
+
+    非 Windows 平台不动：那里本来就是 UTF-8。
     """
     if os.name != "nt":
         return
     try:
         console = bool(getattr(sys.stdout, "isatty", lambda: False)())
-        if not (console or FROZEN):
-            return
         if console:
             import ctypes
 
             ctypes.windll.kernel32.SetConsoleOutputCP(65001)  # type: ignore[attr-defined]
         for target in (sys.stdout, sys.stderr):
             if target is not None and hasattr(target, "reconfigure"):
+                # UTF-8 的码位是完整的，errors="replace" 只是为了兜住
+                # 上游塞进来的代理对之类脏东西，不影响正常输出。
                 target.reconfigure(encoding="utf-8", errors="replace")
     except Exception:                                       # noqa: BLE001
         # 拿不到控制台就算了：日志层本来就有 errors="replace" 兜底

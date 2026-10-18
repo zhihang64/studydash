@@ -24,3 +24,8 @@ venv/
 *.swp
 Thumbs.db
 desktop.ini
+
+# 构建中间产物
+*.whl
+dist_wheel/
+*.egg-info/
