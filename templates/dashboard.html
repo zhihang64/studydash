@@ -1,0 +1,907 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>学习进度看板</title>
+<script>
+/* 提前定主题，避免首屏闪一下白。这一步不需要任何数据。 */
+try {
+  var saved = localStorage.getItem('cx-theme');
+  var forced = (location.hash || '').replace('#', '');   /* #dark / #light 可强制主题 */
+  if (forced === 'dark' || forced === 'light') saved = forced;
+  var dark = saved ? saved === 'dark'
+                   : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+} catch (e) {}
+</script>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #e2e6ec;
+  --border-strong: #c9d1dc;
+  --text: #0f1620;
+  --muted: #5a6472;
+  --faint: #8a94a3;
+  --accent: #2563eb;
+  --accent-soft: #e9f0ff;
+  --ok: #0b7a52;
+  --ok-soft: #e5f6ee;
+  --warn: #97550a;
+  --warn-soft: #fdf2e2;
+  --danger: #b3261e;
+  --danger-soft: #fdeceb;
+  --violet: #7c3aed;
+  --teal: #0d7d84;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 8px 24px -16px rgba(16,24,40,.30);
+  --maxw: 1320px;
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  --bg: #0d1017;
+  --surface: #161a22;
+  --surface-2: #1c212b;
+  --border: #262c38;
+  --border-strong: #39414f;
+  --text: #e7eaf0;
+  --muted: #a2acbb;
+  --faint: #7d8798;
+  --accent: #7ba2ff;
+  --accent-soft: #1b2745;
+  --ok: #46d39a;
+  --ok-soft: #10352a;
+  --warn: #f0b357;
+  --warn-soft: #33260f;
+  --danger: #ff8a80;
+  --danger-soft: #3a1a1a;
+  --violet: #b18aff;
+  --teal: #4fc7cf;
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 30px -18px rgba(0,0,0,.8);
+  color-scheme: dark;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei",
+        "Hiragino Sans GB", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+.skip {
+  position: absolute; left: -9999px; top: 0; z-index: 100;
+  background: var(--surface); padding: 10px 16px; border-radius: 0 0 var(--radius-sm) 0;
+  border: 1px solid var(--border);
+}
+.skip:focus { left: 0; }
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 20px; }
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+  display: flex; align-items: center; gap: 16px;
+  min-height: 62px; flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: .2px; }
+.brand svg { width: 24px; height: 24px; flex: none; }
+.brand small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); letter-spacing: 0; }
+.topbar .spacer { flex: 1 1 auto; }
+.meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 550;
+  border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--muted); white-space: nowrap;
+}
+.pill.ro { border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+           background: var(--ok-soft); color: var(--ok); }
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.iconbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--text); cursor: pointer;
+}
+.iconbtn:hover { background: var(--surface-2); }
+.iconbtn svg { width: 17px; height: 17px; }
+html[data-theme="light"] .moon { display: none; }
+html[data-theme="dark"] .sun { display: none; }
+
+/* ---------- 通用 ---------- */
+main { padding: 26px 0 60px; }
+section + section { margin-top: 30px; }
+
+h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: .2px; }
+h2 { font-size: 15px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+
+/* ---------- 概览 ---------- */
+.kpis { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.kpi { padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
+.kpi .label { font-size: 12.5px; color: var(--muted); letter-spacing: .3px; }
+.kpi .value { font-size: 27px; font-weight: 680; line-height: 1.15; letter-spacing: -.4px; }
+.kpi .value .unit { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+.kpi .hint { font-size: 12.5px; color: var(--faint); }
+.kpi.is-danger .value { color: var(--danger); }
+.kpi.is-ok .value { color: var(--ok); }
+
+.bar { height: 7px; border-radius: 999px; background: var(--bg); overflow: hidden;
+       border: 1px solid var(--border); }
+.bar > i { display: block; height: 100%; border-radius: 999px; background: var(--accent);
+           transition: width .3s ease; }
+
+/* ---------- 提示条 ---------- */
+.alert { display: flex; gap: 10px; align-items: flex-start; padding: 12px 16px; font-size: 13.5px; }
+.alert.danger { border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+                background: var(--danger-soft); color: var(--danger); }
+.alert.info { border-color: var(--border); background: var(--surface-2); color: var(--muted); }
+.alert + .alert { margin-top: 10px; }
+
+/* ---------- 控件 ---------- */
+.controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+.search { position: relative; flex: 1 1 260px; max-width: 380px; }
+.search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+              width: 16px; height: 16px; color: var(--faint); pointer-events: none; }
+.search input {
+  width: 100%; padding: 9px 12px 9px 34px; font: inherit; font-size: 14px;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+}
+.segmented { display: inline-flex; border: 1px solid var(--border-strong);
+             border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+.segmented button {
+  font: inherit; font-size: 13px; padding: 8px 14px; border: 0; cursor: pointer;
+  background: transparent; color: var(--muted); border-right: 1px solid var(--border);
+}
+.segmented button:last-child { border-right: 0; }
+.segmented button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.segmented button:hover { background: var(--surface-2); }
+
+.select { font: inherit; font-size: 13.5px; padding: 8px 10px; color: var(--text);
+          background: var(--surface); border: 1px solid var(--border-strong);
+          border-radius: var(--radius-sm); }
+.count { font-size: 13px; color: var(--muted); margin-left: auto; }
+
+/* ---------- 课程卡 ---------- */
+.courses { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); }
+.course { padding: 17px 18px 15px; display: flex; flex-direction: column; gap: 13px; }
+.course.risk-high { border-left: 3px solid var(--danger); }
+.course.risk-mid { border-left: 3px solid var(--warn); }
+.course.risk-done { border-left: 3px solid var(--ok); }
+
+.course-top { display: flex; gap: 12px; align-items: flex-start; }
+.course-top .grow { flex: 1 1 auto; min-width: 0; }
+.course h3 { font-size: 16.5px; line-height: 1.35; }
+.course h3 a { color: inherit; text-decoration: none; }
+.course h3 a:hover { color: var(--accent); text-decoration: underline; }
+.course .teacher { font-size: 13px; color: var(--muted); margin-top: 3px;
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pct { font-size: 21px; font-weight: 700; letter-spacing: -.5px; flex: none; }
+.pct small { font-size: 12px; font-weight: 500; color: var(--muted); }
+
+.badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.badge { font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+         border: 1px solid transparent; white-space: nowrap; }
+.badge.danger { background: var(--danger-soft); color: var(--danger);
+                border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.badge.warn { background: var(--warn-soft); color: var(--warn);
+              border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.badge.ok { background: var(--ok-soft); color: var(--ok);
+            border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.badge.plain { background: var(--surface-2); color: var(--muted); border-color: var(--border); }
+
+.cats { display: flex; flex-direction: column; gap: 7px; }
+.cat { display: grid; grid-template-columns: 44px 1fr 66px; gap: 9px; align-items: center;
+       font-size: 12.5px; color: var(--muted); }
+.cat .name { color: var(--muted); }
+.cat .num { text-align: right; font-variant-numeric: tabular-nums; }
+.cat[data-c="video"]      .bar > i { background: var(--accent); }
+.cat[data-c="read"]       .bar > i { background: var(--teal); }
+.cat[data-c="document"]   .bar > i { background: var(--violet); }
+.cat[data-c="discussion"] .bar > i { background: var(--warn); }
+.cat[data-c="quiz"]       .bar > i { background: var(--ok); }
+.cat[data-c="other"]      .bar > i { background: var(--faint); }
+.cat[data-c="overall"]    .bar > i { background: var(--accent); }
+.cat .bar { height: 6px; }
+
+.course-foot { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+               font-size: 12.5px; color: var(--faint); border-top: 1px solid var(--border);
+               padding-top: 10px; }
+
+.due-list { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+.due { display: flex; gap: 8px; align-items: baseline; }
+.due .when { flex: none; font-weight: 600; font-size: 12.5px; }
+.due.overdue .when { color: var(--danger); }
+.due.soon .when { color: var(--warn); }
+.due .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- 时间线 ---------- */
+.tl-groups { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.tl { padding: 15px 17px; }
+.tl h3 { font-size: 14px; display: flex; align-items: center; gap: 8px; margin-bottom: 11px; }
+.tl h3 .badge { font-size: 11px; }
+.tl ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.tl li { display: flex; flex-direction: column; gap: 2px;
+         padding-left: 12px; border-left: 2px solid var(--border); }
+.tl li.danger { border-left-color: var(--danger); }
+.tl li.warn { border-left-color: var(--warn); }
+.tl .t { font-size: 13.5px; }
+.tl .s { font-size: 12.5px; color: var(--faint); }
+
+.empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+
+footer.site { border-top: 1px solid var(--border); padding: 22px 0 40px;
+              font-size: 12.5px; color: var(--faint); }
+footer.site ul { margin: 10px 0 0; padding-left: 18px; }
+footer.site li { margin: 3px 0; }
+
+@media (max-width: 560px) {
+  .wrap { padding: 0 14px; }
+  .kpi .value { font-size: 23px; }
+  .cat { grid-template-columns: 40px 1fr 58px; }
+  .count { margin-left: 0; width: 100%; }
+}
+
+@media print {
+  .topbar, .controls, .iconbtn { display: none !important; }
+  body { background: #fff; }
+  .card { box-shadow: none; break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到主要内容</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 19.5V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2z"></path>
+        <path d="M9 3v18"></path>
+      </svg>
+      <span>学习进度看板
+        <small>只读聚合 · 本地运行 · 不提交任何数据</small>
+      </span>
+    </div>
+    <span class="spacer"></span>
+    <div class="meta">
+      <span class="pill ro"><span class="dot"></span>只读模式</span>
+      <span class="pill" id="pill-source">来源 —</span>
+      <span class="pill" id="pill-time">数据 —</span>
+    </div>
+    <button class="iconbtn" id="theme-btn" type="button" aria-label="切换深浅色主题">
+      <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"></circle>
+        <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path>
+      </svg>
+      <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+  <div class="wrap">
+
+    <section aria-labelledby="h-overview">
+      <h2 id="h-overview">总览</h2>
+      <div class="kpis" id="kpis" style="margin-top:12px"></div>
+      <div id="alerts" style="margin-top:14px"></div>
+    </section>
+
+    <section aria-labelledby="h-courses">
+      <h2 id="h-courses">课程</h2>
+      <div class="controls" style="margin-top:12px">
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+          </svg>
+          <label for="q" class="skip">搜索课程</label>
+          <input id="q" type="search" placeholder="搜索课程或教师…" autocomplete="off">
+        </div>
+        <div class="segmented" role="group" aria-label="筛选">
+          <button type="button" data-filter="all"    aria-pressed="true">全部</button>
+          <button type="button" data-filter="risk"   aria-pressed="false">落后</button>
+          <button type="button" data-filter="due"    aria-pressed="false">有截止</button>
+          <button type="button" data-filter="undone" aria-pressed="false">未完成</button>
+        </div>
+        <label class="skip" for="sort">排序方式</label>
+        <select class="select" id="sort">
+          <option value="urgency">按紧急度排序</option>
+          <option value="gap">按落后程度排序</option>
+          <option value="pct">按进度排序</option>
+          <option value="due">按最近截止排序</option>
+          <option value="name">按课程名排序</option>
+        </select>
+        <span class="count" id="count"></span>
+      </div>
+      <div class="courses" id="courses"></div>
+    </section>
+
+    <section aria-labelledby="h-timeline">
+      <h2 id="h-timeline">截止时间线</h2>
+      <div class="tl-groups" id="timeline" style="margin-top:12px"></div>
+    </section>
+
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <div id="notes"></div>
+    <p style="margin:10px 0 0">
+      本页面是静态文件，数据在渲染时已内嵌；刷新不会重新抓取。要更新请重新运行
+      <code>python dashboard.py all</code> 后刷新。
+      本工具只读取你自己的学习进度用于自我管理，不代做、不提交、不改动任何任务状态。
+    </p>
+  </div>
+</footer>
+
+<script>
+/*__BOOT__*/
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var DATA = window.__PROGRESS__ || { courses: [], notes: [] };
+  var DAY = 86400000, HOUR = 3600000;
+
+  /* ---------------------------------------------------------------- 工具 */
+  function el(tag, attrs, kids) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        var v = attrs[k];
+        if (v === null || v === undefined || v === false) return;
+        if (k === 'text') { node.textContent = String(v); return; }
+        if (k === 'class') { node.className = v; return; }
+        if (k === 'style') { node.setAttribute('style', v); return; }
+        if (k.indexOf('data-') === 0 || k.indexOf('aria-') === 0 || k === 'role' ||
+            k === 'type' || k === 'href' || k === 'target' || k === 'rel' ||
+            k === 'colspan' || k === 'title' || k === 'id' || k === 'for') {
+          node.setAttribute(k, String(v)); return;
+        }
+        node[k] = v;
+      });
+    }
+    (kids || []).forEach(function (kid) {
+      if (kid === null || kid === undefined || kid === false) return;
+      node.appendChild(typeof kid === 'string' ? document.createTextNode(kid) : kid);
+    });
+    return node;
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  function parseDate(value) {
+    if (!value) return null;
+    var d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function pct(done, total) { return total > 0 ? (done / total) * 100 : 0; }
+
+  function round1(n) { return Math.round(n * 10) / 10; }
+
+  function hoursUntil(date) { return (date.getTime() - Date.now()) / HOUR; }
+
+  function fmtRelative(date) {
+    var delta = date.getTime() - Date.now();
+    var abs = Math.abs(delta);
+    var past = delta < 0;
+    var mins = Math.round(abs / 60000);
+    if (mins < 1) return past ? '刚刚' : '不到 1 分钟';
+    if (mins < 60) return past ? '逾期 ' + mins + ' 分钟' : mins + ' 分钟后';
+    var hours = Math.round(abs / HOUR);
+    if (hours < 24) return past ? '逾期 ' + hours + ' 小时' : hours + ' 小时后';
+    var days = Math.round(abs / DAY);
+    if (days < 30) return past ? '逾期 ' + days + ' 天' : days + ' 天后';
+    return past ? '逾期 ' + Math.round(days / 30) + ' 个月' : Math.round(days / 30) + ' 个月后';
+  }
+
+  function fmtDateTime(date) {
+    var p = function (n) { return n < 10 ? '0' + n : String(n); };
+    return (date.getMonth() + 1) + '月' + date.getDate() + '日 ' +
+           p(date.getHours()) + ':' + p(date.getMinutes());
+  }
+
+  function fmtAgo(date) {
+    var hours = (Date.now() - date.getTime()) / HOUR;
+    if (hours < 0) return '—';
+    if (hours < 1) return '刚刚';
+    if (hours < 24) return Math.round(hours) + ' 小时前';
+    var days = Math.round(hours / 24);
+    if (days < 30) return days + ' 天前';
+    return Math.round(days / 30) + ' 个月前';
+  }
+
+  var CATS = [
+    ['video', '视频'], ['read', '阅读'], ['document', '文档'],
+    ['discussion', '讨论'], ['quiz', '测验'], ['other', '其他']
+  ];
+
+  /* ------------------------------------------------------------ 派生计算 */
+  var term = DATA.term || {};
+  var termStart = parseDate(term.start), termEnd = parseDate(term.end);
+  var termElapsed = null;
+  if (termStart && termEnd && termEnd > termStart) {
+    termElapsed = (Date.now() - termStart.getTime()) / (termEnd.getTime() - termStart.getTime());
+    termElapsed = Math.max(0, Math.min(1, termElapsed));
+  }
+
+  var courses = (DATA.courses || []).map(function (raw) {
+    var progress = raw.progress || {};
+    var done = 0, total = 0, cats = [], percentOverride = null;
+    CATS.forEach(function (pair) {
+      var key = pair[0], entry = progress[key];
+      if (!entry) return;
+      var d = Number(entry.done) || 0, t = Number(entry.total) || 0;
+      if (!t && !d) return;
+      var isPct = entry.unit === 'percent';
+      if (isPct) {
+        /* 数据源只给了总百分比：展示它，但不计入"任务点"个数 */
+        var p = pct(d, t);
+        if (percentOverride === null) percentOverride = p;
+        cats.push({ key: 'overall', label: '总体', pct: p,
+                    display: round1(p) + '%' });
+        return;
+      }
+      done += d; total += t;
+      cats.push({ key: key, label: pair[1], pct: pct(d, t), display: d + ' / ' + t });
+    });
+    var percent = percentOverride !== null ? percentOverride : pct(done, total);
+    var gap = termElapsed === null ? null : termElapsed * 100 - percent;
+
+    var deadlines = (raw.deadlines || []).map(function (d) {
+      var due = parseDate(d.due);
+      return {
+        task: d.task || '(未命名任务)', kind: d.kind || 'other',
+        status: d.status === 'done' ? 'done' : 'pending',
+        due: d.due, date: due,
+        hours: due ? hoursUntil(due) : null
+      };
+    });
+    var pending = deadlines.filter(function (d) { return d.status === 'pending'; })
+                           .sort(function (a, b) {
+                             if (a.hours === null) return 1;
+                             if (b.hours === null) return -1;
+                             return a.hours - b.hours;
+                           });
+    var overdue = pending.filter(function (d) { return d.hours !== null && d.hours < 0; });
+
+    var urgency = 0;
+    pending.forEach(function (d) {
+      if (d.hours === null) return;
+      if (d.hours < 0) urgency += 100 + Math.min(60, -d.hours / 24);
+      else urgency += Math.max(0, 55 - (d.hours / 24) * 2);
+    });
+    urgency += (total - done) * 0.7;
+
+    var risk = 'none';
+    if (percent >= 100) risk = 'done';
+    else if (gap !== null && percent > 0) {
+      if (gap >= 25) risk = 'high';
+      else if (gap >= 10) risk = 'mid';
+    }
+    if (overdue.length && risk !== 'high') risk = overdue.length > 1 ? 'high' : 'mid';
+
+    return {
+      id: raw.id, name: raw.name || '(未命名课程)', teacher: raw.teacher || '',
+      term: raw.term || '', url: raw.url || '',
+      cats: cats, done: done, total: total, percent: percent,
+      unfinished: Math.max(0, total - done), gap: gap, risk: risk,
+      deadlines: deadlines, pending: pending, overdue: overdue,
+      nextDue: pending.length ? pending[0] : null,
+      lastStudy: parseDate(raw.last_study_at),
+      urgency: urgency
+    };
+  });
+
+  /* --------------------------------------------------------------- 概览 */
+  function renderKpis() {
+    var host = document.getElementById('kpis');
+    clear(host);
+
+    var doneAll = 0, totalAll = 0;
+    courses.forEach(function (c) { doneAll += c.done; totalAll += c.total; });
+
+    var overall, overallHint;
+    if (totalAll > 0) {
+      overall = pct(doneAll, totalAll);
+      overallHint = doneAll + ' / ' + totalAll + ' 个任务点';
+    } else {
+      /* 只有总百分比的数据源：用有进度信息的课程取平均 */
+      var withPct = courses.filter(function (c) { return c.percent > 0; });
+      overall = withPct.length
+        ? withPct.reduce(function (s, c) { return s + c.percent; }, 0) / withPct.length
+        : 0;
+      overallHint = withPct.length
+        ? withPct.length + ' 门课程的平均进度'
+        : '暂无可统计的进度数据';
+    }
+
+    var unfinished = courses.reduce(function (s, c) { return s + c.unfinished; }, 0);
+    var overdueCount = courses.reduce(function (s, c) { return s + c.overdue.length; }, 0);
+    var risers = courses.filter(function (c) { return c.risk === 'high' || c.risk === 'mid'; }).length;
+
+    var nextAll = null;
+    courses.forEach(function (c) {
+      if (c.nextDue && c.nextDue.hours !== null) {
+        if (!nextAll || c.nextDue.hours < nextAll.hours) nextAll = c.nextDue;
+      }
+    });
+
+    var cards = [];
+
+    cards.push(el('div', { class: 'card kpi' }, [
+      el('span', { class: 'label', text: '课程总数' }),
+      el('span', { class: 'value', text: String(courses.length) }),
+      el('span', { class: 'hint', text: risers ? risers + ' 门需要关注' : '暂无落后课程' })
+    ]));
+
+    var overallCard = el('div', {
+      class: 'card kpi' + (overall >= 100 ? ' is-ok' : '')
+    }, [
+      el('span', { class: 'label', text: '整体进度' }),
+      el('span', { class: 'value' }, [
+        document.createTextNode(String(round1(overall))),
+        el('span', { class: 'unit', text: '%' })
+      ]),
+      el('div', { class: 'bar', role: 'progressbar', 'aria-valuemin': '0',
+                  'aria-valuemax': '100', 'aria-valuenow': String(round1(overall)),
+                  'aria-label': '整体进度' }, [
+        el('i', { style: 'width:' + Math.min(100, overall) + '%' })
+      ]),
+      el('span', { class: 'hint', text: overallHint })
+    ]);
+    cards.push(overallCard);
+
+    cards.push(el('div', { class: 'card kpi' }, [
+      el('span', { class: 'label', text: '待完成任务点' }),
+      el('span', { class: 'value', text: totalAll > 0 ? String(unfinished) : '—' }),
+      el('span', { class: 'hint', text: totalAll > 0
+        ? (unfinished ? '按你自己的节奏安排' : '全部完成，很棒')
+        : '数据源只给了总百分比，没有任务点数量' })
+    ]));
+
+    var dueCard = el('div', {
+      class: 'card kpi' + (overdueCount ? ' is-danger' : '')
+    }, [
+      el('span', { class: 'label', text: overdueCount ? '已逾期' : '最近截止' }),
+      el('span', { class: 'value' },
+         overdueCount
+           ? [document.createTextNode(String(overdueCount)),
+              el('span', { class: 'unit', text: '项' })]
+           : [document.createTextNode(nextAll ? fmtRelative(nextAll.date) : '—')]),
+      el('span', {
+        class: 'hint',
+        text: overdueCount
+          ? '最早一项：' + (nextAll ? fmtDateTime(nextAll.date) : '—')
+          : (nextAll ? nextAll.task.slice(0, 22) : '没有登记截止时间')
+      })
+    ]);
+    cards.push(dueCard);
+
+    cards.forEach(function (c) { host.appendChild(c); });
+  }
+
+  function renderAlerts() {
+    var host = document.getElementById('alerts');
+    clear(host);
+    var overdueTotal = courses.reduce(function (s, c) { return s + c.overdue.length; }, 0);
+    var high = courses.filter(function (c) { return c.risk === 'high'; });
+
+    if (overdueTotal) {
+      host.appendChild(el('div', { class: 'card alert danger' }, [
+        el('strong', { text: '有 ' + overdueTotal + ' 项已过截止时间。' }),
+        el('span', { text: '看板不会替你提交，请自行到课程页面确认是否还能补交。' })
+      ]));
+    }
+    if (high.length) {
+      host.appendChild(el('div', { class: 'card alert info' }, [
+        el('strong', { text: high.length + ' 门课程进度明显落后：' }),
+        el('span', { text: high.map(function (c) { return c.name; }).join('、') })
+      ]));
+    }
+  }
+
+  /* ------------------------------------------------------------ 课程卡 */
+  function courseCard(c) {
+    var head = el('div', { class: 'course-top' }, [
+      el('div', { class: 'grow' }, [
+        el('h3', null, [
+          c.url ? el('a', { href: c.url, target: '_blank', rel: 'noopener noreferrer',
+                           text: c.name }) : document.createTextNode(c.name)
+        ]),
+        el('div', { class: 'teacher', text:
+          [c.teacher, c.term].filter(Boolean).join(' · ') || '—' })
+      ]),
+      el('div', { class: 'pct' }, [
+        document.createTextNode(String(round1(c.percent))),
+        el('small', { text: '%' })
+      ])
+    ]);
+
+    var badges = el('div', { class: 'badges' });
+    if (c.total === 0) {
+      badges.appendChild(el('span', { class: 'badge plain',
+        text: c.percent > 0 ? '仅总进度' : '无任务点数据' }));
+    } else if (c.unfinished === 0) {
+      badges.appendChild(el('span', { class: 'badge ok', text: '已全部完成' }));
+    } else {
+      badges.appendChild(el('span', { class: 'badge plain', text: '待完成 ' + c.unfinished }));
+    }
+    if (c.overdue.length) {
+      badges.appendChild(el('span', { class: 'badge danger', text: '逾期 ' + c.overdue.length + ' 项' }));
+    }
+    if (c.gap !== null && c.gap >= 25) {
+      badges.appendChild(el('span', { class: 'badge danger',
+        text: '落后 ' + Math.round(c.gap) + ' 个百分点' }));
+    } else if (c.gap !== null && c.gap >= 10) {
+      badges.appendChild(el('span', { class: 'badge warn',
+        text: '略落后 ' + Math.round(c.gap) + ' 个百分点' }));
+    }
+
+    var cats = el('div', { class: 'cats' });
+    if (!c.cats.length) {
+      cats.appendChild(el('div', { class: 'badge plain', text: '该课程没有细分任务点数据' }));
+    }
+    c.cats.forEach(function (cat) {
+      var p = Math.min(100, cat.pct);
+      cats.appendChild(el('div', { class: 'cat', 'data-c': cat.key }, [
+        el('span', { class: 'name', text: cat.label }),
+        el('div', { class: 'bar', role: 'progressbar', 'aria-valuemin': '0',
+                    'aria-valuemax': '100', 'aria-valuenow': String(round1(cat.pct)),
+                    'aria-label': c.name + ' ' + cat.label + ' 进度' }, [
+          el('i', { style: 'width:' + p + '%' })
+        ]),
+        el('span', { class: 'num', text: cat.display })
+      ]));
+    });
+
+    var dueList = el('div', { class: 'due-list' });
+    c.pending.slice(0, 3).forEach(function (d) {
+      var cls = 'due';
+      if (d.hours !== null && d.hours < 0) cls += ' overdue';
+      else if (d.hours !== null && d.hours < 72) cls += ' soon';
+      dueList.appendChild(el('div', { class: cls }, [
+        el('span', { class: 'when', text: d.date ? fmtRelative(d.date) : '未定' }),
+        el('span', { class: 'what', title: d.task, text: d.task })
+      ]));
+    });
+    if (c.pending.length > 3) {
+      dueList.appendChild(el('div', { class: 'due' }, [
+        el('span', { class: 'when', text: '+' + (c.pending.length - 3) }),
+        el('span', { class: 'what', text: '还有 ' + (c.pending.length - 3) + ' 项待办' })
+      ]));
+    }
+
+    var foot = el('div', { class: 'course-foot' }, [
+      el('span', { text: c.lastStudy ? '最近学习 ' + fmtAgo(c.lastStudy) : '暂无学习记录' }),
+      el('span', { text: c.pending.length ? c.pending.length + ' 项待办' : '无待办' })
+    ]);
+
+    var riskClass = c.risk === 'high' ? ' risk-high'
+                  : c.risk === 'mid' ? ' risk-mid'
+                  : c.risk === 'done' ? ' risk-done' : '';
+
+    var article = el('article', { class: 'card course' + riskClass,
+                                  'aria-label': c.name + ' 进度' },
+                     [head, badges, cats]);
+    if (dueList.childNodes.length) article.appendChild(dueList);
+    article.appendChild(foot);
+    return article;
+  }
+
+  var state = { filter: 'all', sort: 'urgency', q: '' };
+
+  function visibleCourses() {
+    var list = courses.filter(function (c) {
+      if (state.q) {
+        var hay = (c.name + ' ' + c.teacher).toLowerCase();
+        if (hay.indexOf(state.q.toLowerCase()) === -1) return false;
+      }
+      if (state.filter === 'risk') return c.risk === 'high' || c.risk === 'mid';
+      if (state.filter === 'due') return c.pending.length > 0;
+      if (state.filter === 'undone') return c.unfinished > 0;
+      return true;
+    });
+    var sorters = {
+      urgency: function (a, b) { return b.urgency - a.urgency; },
+      gap: function (a, b) { return (b.gap === null ? -999 : b.gap) - (a.gap === null ? -999 : a.gap); },
+      pct: function (a, b) { return a.percent - b.percent; },
+      due: function (a, b) {
+        var av = a.nextDue && a.nextDue.hours !== null ? a.nextDue.hours : Infinity;
+        var bv = b.nextDue && b.nextDue.hours !== null ? b.nextDue.hours : Infinity;
+        return av - bv;
+      },
+      name: function (a, b) { return a.name.localeCompare(b.name, 'zh-CN'); }
+    };
+    return list.sort(sorters[state.sort] || sorters.urgency);
+  }
+
+  function renderCourses() {
+    var host = document.getElementById('courses');
+    clear(host);
+    var list = visibleCourses();
+    document.getElementById('count').textContent =
+      '显示 ' + list.length + ' / ' + courses.length + ' 门';
+
+    if (!list.length) {
+      host.appendChild(el('div', { class: 'card empty',
+        text: courses.length ? '没有符合当前筛选条件的课程。' : '还没有数据，先跑 python dashboard.py demo' }));
+      return;
+    }
+    list.forEach(function (c) { host.appendChild(courseCard(c)); });
+  }
+
+  /* ------------------------------------------------------------ 时间线 */
+  function renderTimeline() {
+    var host = document.getElementById('timeline');
+    clear(host);
+
+    var all = [];
+    courses.forEach(function (c) {
+      c.pending.forEach(function (d) {
+        if (!d.date) return;
+        all.push({ course: c.name, task: d.task, date: d.date, hours: d.hours });
+      });
+    });
+
+    var groups = [
+      { key: 'overdue', title: '已逾期', cls: 'danger',
+        test: function (h) { return h < 0; } },
+      { key: 'today',   title: '今天内', cls: 'warn',
+        test: function (h) { return h >= 0 && h < 24; } },
+      { key: 'd3',      title: '3 天内', cls: 'warn',
+        test: function (h) { return h >= 24 && h < 72; } },
+      { key: 'd7',      title: '7 天内', cls: '',
+        test: function (h) { return h >= 72 && h < 168; } },
+      { key: 'later',   title: '7 天以后', cls: '',
+        test: function (h) { return h >= 168; } }
+    ];
+
+    var any = false;
+    groups.forEach(function (g) {
+      var items = all.filter(function (it) { return g.test(it.hours); })
+                     .sort(function (a, b) { return a.hours - b.hours; });
+      if (!items.length) return;
+      any = true;
+
+      var list = el('ul');
+      items.slice(0, 12).forEach(function (it) {
+        list.appendChild(el('li', { class: g.cls }, [
+          el('span', { class: 't', text: it.task }),
+          el('span', { class: 's', text: it.course + ' · ' +
+            fmtDateTime(it.date) + '（' + fmtRelative(it.date) + '）' })
+        ]));
+      });
+      if (items.length > 12) {
+        list.appendChild(el('li', null, [
+          el('span', { class: 's', text: '另有 ' + (items.length - 12) + ' 项' })
+        ]));
+      }
+
+      host.appendChild(el('section', { class: 'card tl' }, [
+        el('h3', null, [
+          document.createTextNode(g.title),
+          el('span', { class: 'badge ' + (g.cls || 'plain'), text: String(items.length) })
+        ]),
+        list
+      ]));
+    });
+
+    if (!any) {
+      host.appendChild(el('div', { class: 'card empty',
+        text: '没有带截止时间的待办项。若课程有截止时间但这里为空，说明数据源没有提供该字段。' }));
+    }
+  }
+
+  /* ------------------------------------------------------------ 头部信息 */
+  function renderMeta() {
+    var srcLabel = { demo: '演示数据', chaoxing: '超星只读抓取', import: '本地页面导入' };
+    document.getElementById('pill-source').textContent =
+      '来源 ' + (srcLabel[DATA.source] || DATA.source || '未知');
+
+    var t = parseDate(DATA.generated_at);
+    document.getElementById('pill-time').textContent =
+      t ? '数据 ' + fmtAgo(t) : '数据 —';
+
+    var notes = document.getElementById('notes');
+    clear(notes);
+    var lines = (DATA.notes || []).concat(
+      DATA.account && DATA.account.uid ? ['账号 uid ' + DATA.account.uid] : []
+    );
+    if (!lines.length) return;
+    var ul = el('ul');
+    lines.forEach(function (line) { ul.appendChild(el('li', { text: line })); });
+    notes.appendChild(el('div', { text: '数据说明' }));
+    notes.appendChild(ul);
+  }
+
+  /* -------------------------------------------------------------- 交互 */
+  function bind() {
+    var q = document.getElementById('q');
+    q.addEventListener('input', function () {
+      state.q = q.value.trim();
+      renderCourses();
+    });
+
+    document.getElementById('sort').addEventListener('change', function (e) {
+      state.sort = e.target.value;
+      renderCourses();
+    });
+
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.segmented button'),
+      function (btn) {
+        btn.addEventListener('click', function () {
+          state.filter = btn.dataset.filter;
+          Array.prototype.forEach.call(
+            document.querySelectorAll('.segmented button'),
+            function (other) {
+              other.setAttribute('aria-pressed', String(other === btn));
+            }
+          );
+          renderCourses();
+        });
+      }
+    );
+
+    document.getElementById('theme-btn').addEventListener('click', function () {
+      var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('cx-theme', next); } catch (e) {}
+    });
+  }
+
+  try {
+    renderMeta();
+    renderKpis();
+    renderAlerts();
+    renderCourses();
+    renderTimeline();
+    bind();
+  } catch (err) {
+    var host = document.getElementById('courses');
+    clear(host);
+    host.appendChild(el('div', { class: 'card empty',
+      text: '渲染出错：' + (err && err.message ? err.message : err) }));
+    if (window.console) console.error(err);
+  }
+})();
+</script>
+</body>
+</html>

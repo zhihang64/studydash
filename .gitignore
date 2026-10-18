@@ -1,0 +1,23 @@
+# ---- 含登录态 / 账号页面原文 / 真实课程数据，绝不提交 ----
+config.json
+data/
+out/
+
+# ---- 打包产物 ----
+build/
+dist/
+*.spec
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
