@@ -222,6 +222,32 @@ python dashboard.py build  --data data\_t.json --out out\_t.html
 
 ---
 
+## 版本与发布
+
+当前版本 **v1.0.0**，更新内容见 [CHANGELOG.md](CHANGELOG.md)。
+
+版本号在三处同步，改版本时一起改：
+
+1. `dashboard.py` 的 `__version__`
+2. `tools/version_info.txt`（exe 的 Windows 版本资源）
+3. `CHANGELOG.md`
+
+发版流程：
+
+```bat
+git commit -am "chore: 升到 v1.1.0"
+git tag -a v1.1.0 -m "v1.1.0"
+git push origin main v1.1.0
+```
+
+推 `v*` 标签会触发 [`.github/workflows/build-exe.yml`](.github/workflows/build-exe.yml)：
+在 windows-latest 上打包 exe → 在干净目录跑一次一键模式冒烟测试 → 上传 artifact →
+挂到同名 Release。手动触发（workflow_dispatch）则只出 artifact，不发 Release。
+
+本地打包用 `pwsh -File tools\build_exe.ps1`，和 CI 走的是同一个脚本。
+
+---
+
 ## 已知限制
 
 - **抓取层需要你的账号验证**。`config.json` 里的 `endpoints.course_list` 是按已知的
