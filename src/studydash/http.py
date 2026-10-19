@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import gzip
+import http.cookiejar
 import json as _json
 import re
 import time
@@ -169,8 +170,13 @@ class HttpClient:
 
         self.trace: list[HttpTrace] = []
         self._last_at = 0.0
+        # 真正的 Cookie 罐：登录流程要靠它跨请求带着 JSESSIONID，并在服务端
+        # 下发会话 Cookie 时自动收下（Set-Cookie 由 HTTPCookieProcessor 处理）。
+        # 注意：手工传的 ``cookie=`` 会作为 Cookie 头写入请求，而 CookieJar 只在
+        # 请求上**还没有** Cookie 头时才补——所以手工 cookie 优先，行为与从前一致。
+        self.jar = http.cookiejar.CookieJar()
         self._opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(),
+            urllib.request.HTTPCookieProcessor(self.jar),
             urllib.request.HTTPRedirectHandler(),
         )
         # 不跟随 gzip 的自动解压留给 Content-Encoding 处理，禁用 brotli
@@ -274,6 +280,43 @@ class HttpClient:
             if url == base or (url.startswith(base) and url[len(base)] in "/?&#;"):
                 return True
         return False
+
+    # -- Cookie ------------------------------------------------------------ #
+
+    def jar_cookies(self, *, ref: float | None = None) -> list[tuple[str, str]]:
+        """Cookie 罐里的 ``(名字, 值)``，已丢弃过期的。同名取最后一个。
+
+        登录流程靠这个把服务端下发的会话 Cookie 抠出来，存进配置；之后所有请求
+        都用不着再走一遍登录。
+        """
+        now = time.time() if ref is None else ref
+        pairs: dict[str, str] = {}
+        for cookie in self.jar:
+            if cookie.is_expired(now):
+                continue
+            if cookie.value:
+                pairs[cookie.name] = cookie.value
+        return list(pairs.items())
+
+    def cookie_header(self, url: str = "https://i.chaoxing.com/", *,
+                      ref: float | None = None) -> str:
+        """拼出可直接放进 ``cookie=`` 的请求头字符串。
+
+        默认按 ``url`` 让 CookieJar 自己挑（域、路径、Secure 都算进去），而不是
+        把所有 Cookie 一股脑塞进去——后者在跨域登录时会把别的站的 Cookie 也带上。
+
+        ``ref`` 传一个更晚的时间戳即可判断「这些 Cookie 到那时还在不在」。
+        """
+        if ref is None:
+            request = urllib.request.Request(url)
+            self.jar.add_cookie_header(request)
+            return request.get_header("Cookie", "") or ""
+        pairs = self.jar_cookies(ref=ref)
+        return "; ".join(f"{name}={value}" for name, value in pairs)
+
+    def clear_jar(self) -> None:
+        """清空 Cookie 罐（换账号重登时用）。"""
+        self.jar.clear()
 
     # -- 内部 -------------------------------------------------------------- #
 

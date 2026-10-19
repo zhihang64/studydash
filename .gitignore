@@ -4,6 +4,7 @@ data/
 out/
 # 测试/调试用的临时工作区（内含 progress.json 与页面原文）
 .tmp_*/
+.tmp*
 .crash-home/
 
 # ---- 打包产物 ----

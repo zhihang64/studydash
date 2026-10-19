@@ -54,7 +54,10 @@ LOGGED_OUT_HINTS = (
     "fanyalogin",
 )
 
-SOURCES = ("live", "browser", "file", "manual")
+#: 取会话的所有途径。前两个由工具自己在内部走完整个登录流程
+#: （``qr`` 在终端出二维码用手机扫，``password`` 输账号密码）；
+#: 后四个只是把别处已经存在的 Cookie 搬过来而已。
+SOURCES = ("qr", "password", "live", "browser", "file", "manual")
 
 
 class LoginError(Exception):

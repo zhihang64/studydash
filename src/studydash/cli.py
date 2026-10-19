@@ -3,6 +3,7 @@
 命令一览（``studydash --help``）::
 
     init        生成配置文件和数据目录
+    login       登录一次拿到会话并存进配置（扫码 / 账号密码 / 浏览器 / 文件 / 手粘）
     demo        不联网，用内置样例数据渲一张看板，先看看长什么样
     fetch       按配置抓取所有启用平台的进度，存到 data/progress.json
     build       拿 data/progress.json 渲染出 out/dashboard.html
@@ -22,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -30,7 +32,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import __version__, login
+from . import __version__, login, passlogin, qrlogin
 from .aggregate import aggregate, build_payload, summary_lines
 from .log import Log
 from .model import SCHEMA_VERSION, Account, classify_all, iso, now
@@ -91,22 +93,30 @@ def build_parser() -> argparse.ArgumentParser:
     p = subs.add_parser(
         "login",
         parents=[common],
-        help="登录一次取得会话并存进配置（默认起独立浏览器，不用关你原来的）",
+        help="登录一次取得会话并存进配置（默认扫码，不用关你原来的浏览器）",
     )
     p.add_argument(
         "--source",
         choices=login.SOURCES,
-        default="live",
-        help="live=起独立浏览器你来登录；browser=读日常浏览器配置档；file=读导出文件；manual=直接粘 Cookie",
+        default="qr",
+        help="qr=终端出二维码用手机扫（默认）；password=输账号密码；"
+             "live=起独立浏览器你来登；browser=读日常浏览器配置档；file=读导出文件；manual=直接粘 Cookie",
     )
     p.add_argument("--browser", default="edge", help="live/browser 用哪个浏览器（edge/chrome/brave/firefox）")
     p.add_argument("--profile", default="", help="browser 源：指定配置档名，默认取第一个")
     p.add_argument("--file", dest="cookie_file", metavar="FILE", help="file 源：导出的 JSON / cookies.txt")
     p.add_argument("--cookie", default="", help="manual 源：Cookie 请求头")
+    p.add_argument("--user", default="", help="password 源：账号，不填就现场问")
+    p.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="password 源：从标准输入读一行当密码（给脚本用；不要在命令行里传密码）",
+    )
     p.add_argument("--platform", default="chaoxing", help="存到哪个平台名下（默认 chaoxing）")
     p.add_argument("--label", default="", help="账号标签，同平台多账号时用来区分")
     p.add_argument("--port", type=int, default=0, help="live 源：调试端口，默认自动挑一个空闲的")
-    p.add_argument("--timeout", type=float, default=300.0, help="live 源：最多等多少秒")
+    p.add_argument("--timeout", type=float, default=0.0,
+                   help="最多等多少秒（qr 默认 240，live 默认 300）")
     p.add_argument("--no-check", action="store_true", help="存之前不验证会话是否真能用")
     p.add_argument("--no-save", action="store_true", help="只取会话，不写进配置")
     p.add_argument("--no-fetch", action="store_true", help="拿到会话就停，不接着抓取")
@@ -284,21 +294,103 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _qr_callbacks(log: Log) -> tuple[Any, Any]:
+    """给 qrlogin 造两个回调：一张新码、一次轮询结果。
+
+    把它们放在这里而不是写成两个模块级函数，是为了让回调里能直接用 ``log`` 的
+    样式（扫码进度该走 info，不该走 error，否则用户以为出错了）。
+    """
+
+    shown = {"message": ""}
+
+    def on_code(ticket: Any) -> None:
+        print()
+        print(ticket.text)
+        print()
+        print("  用手机上的「学习通」App 扫上面这个码，然后在手机上点确认。")
+        print("  二维码大约两分钟会失效，程序会自动换一张，不用重跑命令。")
+        print()
+        shown["message"] = ""
+
+    def on_tick(payload: dict[str, Any]) -> None:
+        # 服务端每次轮询都返回，未扫码时 mes 恒为「未登录」，重复打印只会刷屏；
+        # 只在消息变了的时候说一句（例如变成「已扫码，请确认」）。
+        message = str(payload.get("mes") or "").strip()
+        if message and message != shown["message"]:
+            shown["message"] = message
+            log.info(f"  · {message}")
+
+    return on_code, on_tick
+
+
+def _ask_credentials(args: argparse.Namespace) -> tuple[str, str]:
+    """问出账号和密码。
+
+    密码只走 ``getpass`` / 标准输入，**绝不从命令行参数读**——命令行参数会进
+    shell 历史和进程列表。这里拿到的密码只活在这个函数的返回值里，不落盘、不打日志。
+    """
+    username = _opt(args, "user").strip()
+    if not username:
+        try:
+            username = input("  超星账号（手机号 / 学号 / 邮箱）：").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise login.LoginError(
+                "没有读到账号。换个交互式终端，或用 --user 指定账号"
+            ) from None
+    if not username:
+        raise login.LoginError("账号不能为空")
+
+    if _flag(args, "password_stdin"):
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        try:
+            password = getpass.getpass("  密码（不回显、不保存、不写日志）：")
+        except (EOFError, KeyboardInterrupt):
+            raise login.LoginError("没有读到密码") from None
+        except Exception as exc:  # getpass 在没有 tty 时会炸，给出可用的退路
+            raise login.LoginError(
+                f"读不了密码（{exc}）。用 --password-stdin 从管道喂，或改用 --source qr 扫码"
+            ) from None
+    if not password:
+        raise login.LoginError("密码不能为空")
+    return username, password
+
+
 def cmd_login(args: argparse.Namespace) -> int:
     """取一次会话：取到 → 验一下 → 存进配置。"""
     ctx = Ctx(args)
     ctx.workspace.ensure()
-    source = _opt(args, "source", "live") or "live"
+    source = _opt(args, "source", "qr") or "qr"
     platform = _opt(args, "platform", "chaoxing") or "chaoxing"
     label = _opt(args, "label")
 
+    # qr / password 这两条路自己就会验证会话，所以走过它们之后不必再验一次；
+    # 其余四条只拿到 Cookie，验不验由 --no-check 决定。
+    session: login.Session | None = None
+    cookie = ""
+    verified = False
+
     try:
-        if source == "live":
+        if source == "qr":
+            on_code, on_tick = _qr_callbacks(ctx.log)
+            session = qrlogin.login(
+                timeout=float(_opt(args, "timeout") or 0) or 240.0,
+                log=ctx.log,
+                on_code=on_code,
+                on_tick=on_tick,
+            )
+            cookie, verified = session.cookie, True
+        elif source == "password":
+            username, password = _ask_credentials(args)
+            ctx.log.step(f"用账号密码登录（{username}）")
+            session = passlogin.login(username, password, log=ctx.log)
+            cookie, verified = session.cookie, True
+        elif source == "live":
             ctx.log.step("起一个独立浏览器去登录（不影响你原来开着的浏览器）")
             cookie = login.from_live(
                 browser=_opt(args, "browser", "edge") or "edge",
                 port=int(_opt(args, "port") or 0) or None,
-                timeout=float(_opt(args, "timeout") or 300.0),
+                timeout=float(_opt(args, "timeout") or 0) or 300.0,
                 log=ctx.log,
             )
         elif source == "browser":
@@ -329,9 +421,15 @@ def cmd_login(args: argparse.Namespace) -> int:
     if not cookie:
         ctx.log.error("没取到任何 Cookie。")
         return 1
-    ctx.log.ok(f"取到 {len([p for p in cookie.split(';') if '=' in p])} 条 Cookie（来源：{source}）")
 
-    if not _flag(args, "no_check"):
+    if verified and session is not None:
+        ctx.log.ok(f"会话可用（uid={session.uid or '未知'}，来源：{source}）")
+    else:
+        ctx.log.ok(f"取到 {len([p for p in cookie.split(';') if '=' in p])} 条 Cookie（来源：{source}）")
+
+    if verified and session is not None:
+        pass
+    elif not _flag(args, "no_check"):
         ctx.log.step("验证这个会话在超星上真能用")
         session = login.check(cookie, log=ctx.log)
         if not session.ok:

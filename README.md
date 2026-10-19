@@ -112,22 +112,15 @@ studydash demo --open
 studydash login
 ```
 
-它会**新开一个属于自己的浏览器窗口**（用一份独立的配置档，不碰你日常那个浏览器，
-所以你不用关掉正在用的 Edge/Chrome），停在超星登录页。你在里面正常登录——账号密码、
-手机验证码、扫码，都你自己过，程序一个字符都看不到。
-
-登录成功后命令行会自己往下走：**读会话 → 抓课程和作业 → 渲染 → 打开看板**。
-也就是说，登录完你面对的就已经是学业总览页面了。
+它把二维码**画在终端里**——不用开浏览器、不用装扩展、不用 F12 手抄 Cookie：
 
 ```text
-▸ 起一个独立浏览器去登录（不影响你原来开着的浏览器）
-  已用edge打开登录页（独立配置档，不影响你原来开着的浏览器）。
-  配置档位置：C:\Users\you\.studydash\browser
-  请在那个窗口里登录超星学习通；登进去之后不用管，我会自动取到会话并关掉这个窗口。
-  已取到登录会话。
-  ✓ 取到 3 条 Cookie（来源：live）
-  ▸ 验证这个会话在超星上真能用
-  ✓ 会话可用（uid=1234567）
+  ▸ 向超星要一张登录二维码
+      （终端里出现一张二维码）
+  用手机上的「学习通」App 扫上面这个码，然后在手机上点确认。
+  二维码大约两分钟会失效，程序会自动换一张，不用重跑命令。
+    · 已扫码，请在手机上确认
+  ✓ 会话可用（uid=1234567，来源：qr）
   ✓ 已存入配置：…\config.json
   ▸ 接着抓取「chaoxing」的学业数据
   ✓ 超星学习通：12 门课
@@ -135,21 +128,37 @@ studydash login
   待办 6 项（逾期 1 · 三天内 2），已完成 9 项
 ```
 
-那份配置档会留在 `~/.studydash/browser`（可用 `STUDYDASH_BROWSER_EXE` 换浏览器
-可执行文件、`--port` 指定调试端口），所以**下次登录不用再登一遍**。它的 Cookie 就存在
-那里，等于一份本地会话副本——不想留，直接删掉这个目录。
+登录成功后命令行会自己往下走：**取会话 → 抓课程和作业 → 渲染 → 打开看板**。
+也就是说，登录完你面对的就已经是学业总览页面了。
 
-### 四条取会话的路，挑一条走
+不想扫码就输账号密码：
+
+```bash
+studydash login --source password --user 13800000000
+```
+
+密码走 `getpass`（不回显、不进 shell 历史），进程里也**只经过一次 AES 加密**就发出去，
+不落盘、不打日志——配置里存的永远只有会话 Cookie。学习通侧要求验证码或二次验证时，
+程序会明确告诉你「改用扫码」，而不是拿一个必然失败的请求去撞。
+
+### 六条取会话的路，挑一条走
 
 | 来源 | 命令 | 什么时候用 |
 | --- | --- | --- |
-| 隔离窗口 | `studydash login` | **首选**。不用关你日常的浏览器，不用手抄 Cookie |
+| 终端扫码 | `studydash login` | **首选**。码画在终端里，手机扫一下就好 |
+| 账号密码 | `studydash login --source password` | 手上没手机、或想脚本化。密码不存、不进历史 |
+| 隔离窗口 | `studydash login --source live` | 想在自己熟悉的浏览器界面里登（扫码/验证码/二次验证都你自己过）。开一份独立配置档，**不用关**你日常的浏览器 |
 | 读日常配置档 | `studydash login --source browser` | 你已经在日常浏览器里登录好了。注意：**要先完全退出那个浏览器**（Chromium 对 Cookie 库持有独占锁，不是程序不给力） |
-| 扩展/工具导出 | `studydash login --file cookies.json` | 浏览器换成 Sora/其他不支持的新格式，或上面两种都不行。吃 Netscape `cookies.txt` 和常见扩展导出的 JSON |
+| 扩展/工具导出 | `studydash login --file cookies.json` | 浏览器换成不支持的新格式，或上面几种都不行。吃 Netscape `cookies.txt` 和常见扩展导出的 JSON |
 | 手动粘贴 | `studydash login --cookie "_uid=..."` | 兜底。F12 → Network → 任一请求 → Request Headers → 整条 `Cookie` |
 
-四条路都会**立刻验证**会话是否真的有效，不会把死 Cookie 写进配置然后让你自己发现。
+不管哪条路，都会**立刻验证**会话是否真的有效，不会把死 Cookie 写进配置然后让你自己发现。
 不想让它自动接着抓取，加 `--no-fetch`；只想存不想验证，加 `--no-check`。
+
+`--source live` 用的那份配置档留在 `~/.studydash/browser`，所以下次走那条路不用再登一遍
+（可用 `--browser` 换浏览器、`STUDYDASH_BROWSER_EXE` 换可执行文件、`--port` 指定调试端口）。
+它的 Cookie 就在那里，等于一份本地会话副本——不想留，直接删掉这个目录。扫码和密码这两条
+路不写任何浏览器配置档。
 
 ### 超星学习通（status: beta）
 
@@ -237,7 +246,7 @@ unix 时间戳。
 | 命令 | 作用 |
 | --- | --- |
 | *（不带子命令）* | 一键：有 Cookie 就抓、否则用已有数据或演示数据，渲染后打开浏览器 |
-| **`login`** | **登录并把会话存起来**：默认开隔离浏览器窗口；`--source browser/file/cookie` 换来源；默认登录后直接抓取＋渲染＋打开 |
+| **`login`** | **登录并把会话存起来**：默认**在终端画二维码**用手机扫；`--source password/live/browser/file/manual` 换来源；默认登录后直接抓取＋渲染＋打开 |
 | `init` | 生成 `config.json`（已有则不覆盖，要重建加 `--force`） |
 | `demo` | 内置样例数据 → payload → 渲染 |
 | `platforms` | 列出所有适配器及其状态 |
@@ -258,12 +267,17 @@ unix 时间戳。
 
 | 参数 | 说明 |
 | --- | --- |
-| `--source live\|browser\|file\|manual` | 会话来源，默认 `live`（隔离窗口） |
-| `--browser edge\|chrome` | 用哪个浏览器，默认 `edge` |
-| `--profile NAME` | 指定配置档（`--source browser` 时用），默认 `Default` |
+| `--source qr\|password\|live\|browser\|file\|manual` | 会话来源，默认 `qr`（终端出二维码，手机扫） |
+| `--user NAME` | `--source password` 的账号，不填就现场问 |
+| `--password-stdin` | `--source password` 从标准输入读一行当密码（给脚本用；**别用命令行参数传密码**，那会进 shell 历史） |
+| `--browser edge\|chrome` | `--source live/browser` 用哪个浏览器，默认 `edge` |
+| `--profile NAME` | 指定配置档（`--source browser` 时用），默认取第一个 |
 | `--file PATH` | `--source file` 时的 cookies.json / cookies.txt |
 | `--cookie TEXT` | `--source manual` 时的整条 Cookie |
+| `--platform ID` | 存到哪个平台名下，默认 `chaoxing` |
 | `--label NAME` | 存进 `config.json` 时的账号名，默认自动（`默认（uid）`） |
+| `--port N` | `--source live` 的调试端口，默认自动挑一个空闲的 |
+| `--timeout N` | 最多等多少秒（`qr` 默认 240，`live` 默认 300） |
 | `--no-check` | 跳过会话验证（不推荐） |
 | `--no-save` | 不写 `config.json` |
 | `--no-fetch` | 存完就停，不接着抓取渲染 |
@@ -469,9 +483,19 @@ git push origin main v2.1.0
 `Config.to_dict(redact=True)` 会把 cookie/token/password/secret/authorization
 换掉。分享看板 HTML 前留意它内嵌了你的课程与账号信息。
 
+**关于登录**（`studydash login`）：
+
+- **扫码和账号密码这两条路不碰任何浏览器数据。** 二维码是工具直接向超星要的，画在
+  终端上，只包含一次性的登录票据；你在手机上点确认之前，程序手上没有任何凭据。
+- **不存密码。** `--source password` 的密码走 `getpass`（不回显、不进 shell 历史、
+  不用命令行参数），只在本进程内存里存到发出去为止，随后按超星的协议做一次
+  AES-128-CBC 加密发出；**不落盘、不写日志**。`config.json` 里永远只有会话 Cookie。
+- **不代过验证码和二次验证。** 平台要求这些时程序会明确拒绝并建议改用扫码，
+  而不是去猜、去绕。
+
 **关于读浏览器 Cookie**（`studydash login` 的 `live` / `browser` 两种来源）：
 
-- 必须你在命令行点名浏览器才会读，**没有后台扫描**。`--source live`（默认）开的是
+- 必须你在命令行点名浏览器才会读，**没有后台扫描**。`--source live` 开的是
   一份独立配置档（`~/.studydash/browser`），跟你的日常浏览器完全隔离。
 - 默认只挑 `*.chaoxing.com` / `*.chaoxing.cn` 的 Cookie，其他站的**不取**。
 - 读的是数据库的**副本**（先复制到临时目录再只读打开），不修改浏览器的任何数据。
