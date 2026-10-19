@@ -23,7 +23,9 @@ jobs:
           python-version: '3.13'
 
       - name: 安装测试依赖
-        run: python -m pip install --disable-pip-version-check pytest
+        # tests/test_web.py 会 import fastapi；TestClient 要 httpx。
+        # 少装任何一个，整个测试 job 直接红。
+        run: python -m pip install --disable-pip-version-check pytest fastapi uvicorn httpx
 
       - name: 跑测试
         env:
@@ -52,6 +54,17 @@ jobs:
 
       - name: 安装打包依赖
         run: python -m pip install --disable-pip-version-check pillow pyinstaller
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        # src/studydash/web/static/ 虽然进了仓库，但 CI 里重建一次：
+        # 前端编译不过要在这里红，而不是悄悄用上一版旧产物去打 exe。
+        run: pwsh -File tools/build_web.ps1
 
       - name: 打包
         # 脚本内部用 $PSScriptRoot 定位路径，所以在哪跑都一样；
@@ -88,6 +101,24 @@ jobs:
 
             # 3) 崩溃日志不该出现
             if (Test-Path 'crash.log') { throw "出现了 crash.log：`n$(Get-Content crash.log -Raw)" }
+
+            # 4) 网页版：打包进去的前端静态资源真的能被托管
+            #    只查 /（注入过令牌的 index.html）——拿不到令牌也能验，够用了。
+            $proc = Start-Process -FilePath $exe -ArgumentList 'web', '--no-open', '--port', '8811' -PassThru -WindowStyle Hidden
+            try {
+              $ok = $false
+              foreach ($i in 1..40) {
+                Start-Sleep -Milliseconds 500
+                try {
+                  $html = (Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8811/' -TimeoutSec 3).Content
+                  if ($html -match 'window\.__STUDYDASH__\s*=\s*\{') { $ok = $true; break }
+                } catch { }
+              }
+              if (-not $ok) { throw '网页版没起来，或者 index.html 里没有注入令牌（前端产物没打进 exe？）' }
+              '网页版冒烟通过：index.html 注入正常'
+            } finally {
+              if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            }
           } finally {
             Pop-Location
           }

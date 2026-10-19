@@ -41,6 +41,15 @@ python tools\make_icon.py
 # 2) 打包
 #    注意：给了 --specpath 之后，--icon/--add-data/--version-file 都会相对 spec 所在目录
 #    解析，所以这里一律传绝对路径，否则会报 "Unable to find ...build\templates"。
+#
+#    网页版静态资源：前端产物在 src\studydash\web\static\，它不在 Python 的 import
+#    体系里，PyInstaller 不会自己收，必须显式 add-data，且目标路径要和包的层级一致
+#    （AppState.static_path() 用的是 Path(__file__).parent / "static"）。
+$webIndex = "$root\src\studydash\web\static\index.html"
+if (-not (Test-Path $webIndex)) {
+  throw "缺少前端产物 $webIndex —— 先跑 pwsh -File tools\build_web.ps1"
+}
+
 $common = @(
   '--noconfirm', '--clean',
   '--name', 'studydash',
@@ -48,9 +57,14 @@ $common = @(
   '--version-file', "$root\build\version_info.txt",
   '--paths', "$root\src",
   '--add-data', "$root\src\studydash\templates;templates",
+  '--add-data', "$root\src\studydash\web\static;studydash\web\static",
   '--exclude-module', 'tkinter', '--exclude-module', 'PIL', '--exclude-module', 'numpy',
   '--exclude-module', 'pandas', '--exclude-module', 'matplotlib', '--exclude-module', 'unittest',
-  '--exclude-module', 'pydoc', '--exclude-module', 'doctest', '--exclude-module', 'distutils',
+  # distutils 不能显式 exclude：PyInstaller 自己的 hook-distutils 会把它 alias 成
+  # setuptools._distutils，撞上 ExcludedModule 就抛
+  # 'ValueError: Target module "distutils" already imported as ExcludedModule(...)'，
+  # 打包直接失败。它本来也进不来（根本没人 import）。
+  '--exclude-module', 'pydoc', '--exclude-module', 'doctest',
   '--exclude-module', 'setuptools', '--exclude-module', 'pip', '--exclude-module', 'tornado',
   '--distpath', "$root\dist", '--workpath', "$root\build\work", '--specpath', "$root\build"
 )

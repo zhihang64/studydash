@@ -43,6 +43,12 @@ dev = [
     "pytest>=7.4",
     "ruff>=0.6",
 ]
+# 网页版是可选能力：核心 CLI 与所有适配器只用标准库，不装这两个也能跑。
+# 见 README「网页版」与 docs/web-api.md。
+web = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+]
 
 [project.scripts]
 studydash = "studydash.cli:main"
@@ -60,7 +66,14 @@ where = ["src"]
 include = ["studydash*"]
 
 [tool.setuptools.package-data]
-studydash = ["templates/*.html", "py.typed"]
+# web/static 是前端构建产物（tools\build_web.ps1 生成），必须打进 wheel，
+# 否则 pip 装完 `studydash web` 会说找不到静态资源。
+studydash = [
+    "templates/*.html",
+    "py.typed",
+    "web/static/*",
+    "web/static/assets/*",
+]
 
 [tool.setuptools.dynamic]
 version = { attr = "studydash.__version__" }

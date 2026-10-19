@@ -3,6 +3,68 @@
 本文件格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [3.0.0] - 2026-10-19
+
+**从「命令行工具」变成「打开就能用的本地网页应用」**：v3 的主界面是一个只跑在本机的
+网页版——浏览器里扫码登录、刷新数据、管账号、看五个页面。命令行的能力一个没少，
+静态看板退成兜底。
+
+### 新增
+
+- **网页版后端**（`src/studydash/web/`，FastAPI + uvicorn，可选依赖 `studydash[web]`）：
+  15 个端点，覆盖健康检查、平台名录、环境自检、设置读写、账号增删改、任务创建/查询/
+  取消/事件流、看板数据与演示数据。契约冻结在 `docs/web-api.md`。
+- **本机安全模型**：只监听回环、逐请求校验来源 IP、每次启动生成一次性令牌注入
+  `index.html`（`x-studydash-token` 头）、不使用 Cookie 会话（无 CSRF 面）、
+  关掉交互式 API 文档、响应带 `X-Request-Id`。
+- **前端**（`web/`，Vue 3 + TypeScript + Vite + vue-router + pinia）：五个页面
+  （总览 / 待办 / 课程 / 账号 / 设置），30 个源码文件，深浅双主题，移动端自适应，
+  键盘可达，`role="progressbar"` 等无障碍属性齐全。构建产物落在
+  `src/studydash/web/static/`，随包分发，用户不需要装 Node。
+- **网页里的登录**：「账号」页四个页签——扫码（默认，页面上直接出二维码）、账号密码、
+  粘贴 Cookie、读本机浏览器。四条路都跑在**后台任务**里，进度与日志通过 SSE 实时推
+  到页面，可以关掉抽屉去别处，任务在后台继续。
+- **任务状态机**（`web/tasks.py`）：7 种任务、同 kind 互斥、日志有上限、失败统一翻成
+  错误信封、密码读完立刻从选项里抹掉（快照永远不含密码）。
+- **`studydash web` 子命令**：`--port`（默认 8788，被占自动往后找）、`--host`
+  （只接受回环）、`--no-open`、`--static-dir`。
+- **双击 exe 直接进网页版**：起服务并打开浏览器；网页版依赖缺失或前端产物没打进来时，
+  明确说明原因后**退回静态看板**，而不是安静地少一半功能。
+- **`src/studydash/diagnostics.py`**：`doctor` 的自检项抽成独立模块，CLI 与
+  `GET /api/doctor` 共用同一套判断，三档 `ok`/`warn`/`fail`（只有 fail 算故障）。
+- `http.py` 接入 `http.cookiejar`：登录流程要跨请求保持 JSESSIONID。
+- `tools/build_web.ps1`：前端构建脚本（`npm ci` + `vite build`，产物直接落进 Python 包）。
+
+### 修复
+
+- **所有网页版任务都失败在 `'Task' object has no attribute 'workspace'`**：
+  `TaskManager._run` 把 `Task` 当成 `AppState` 递给了任务实现。更阴的是扫码那条路
+  ——它在用到 `state` 之前就已经把二维码画进快照了，界面看着完全正常，直到真的登录
+  成功才炸。修法：`create()` 显式接收 `state`，`Runner` 的类型别名也改对（原来写的是
+  `Task`，静态检查一路点头）。
+- **`AuthError` 被当成 `provider_error`（502）**：它是 `ProviderError` 的子类，而判定
+  顺序把它排在后面，于是「Cookie 过期了，重新登录一下」被压成「平台故障」，前端也就
+  不会引导用户去重新登录。改成先判子类。
+- **`POST /api/accounts` 静默丢弃 Cookie**：pydantic 默认丢掉模型里没有的键，所以
+  「贴一份 Cookie 建账号」会返回 201 但不存 Cookie，用户以为绑上了、抓取时才发现是空
+  会话。接口现在收 `cookie` 与 `options`。
+- **`doctor` 依赖检查结果错位**：`_web_check()` 成功时只返回两个值，调用处要三个，
+  导致 `doctor` 直接崩；顺带修了 level 判断写反（依赖齐全反而标 `!`）。
+- **量纲混用**：`overview.avg_progress` 是 0–1 而卡片百分比是 0–100，模板拿
+  `toPercent()` 处理后者，导致 66.7% 显示成「6666.7%」。
+- **主题只在设置页生效**：`dashboard.html` 与 `App.vue` 各自只管自己那份，
+  切完主题回到总览又变回旧色。改成挂载前 `initTheme()` + 后端返回的 `ui.theme`
+  作为权威。
+- 前端 `ProgressBar` 的 props 与调用方不一致（传 `value` 收 `ratio`），进度条永远空。
+
+### 变更
+
+- 版本号 2.2.0 → **3.0.0**（主界面换了，属于不兼容的大版本）。
+- `pyproject.toml` 新增可选依赖组 `[web]`（fastapi + uvicorn）；**运行命令行版仍然零
+  第三方依赖**。
+- `aggregate.demo_courses()` 抽出，命令行 `demo` 与网页版「先看演示数据」共用一份样例。
+- `tests` 从 361 例涨到 **435 例**，新增 `tests/test_web.py`。
+
 ## [2.2.0] - 2026-10-19
 
 **「登录」不再需要另一个窗口**：扫码和账号密码这两种登录方式直接坐在工具里。
@@ -223,6 +285,7 @@ v2.1.0 的登录要你切到一个新开的浏览器窗口里去完成，使用�
 - 课程列表页通常只给总进度百分比，不给分项任务点数与截止时间；
   截止时间线需要在 `config.json` 的 `deadlines` 里手工登记。
 
+[3.0.0]: https://github.com/zhihang64/studydash/releases/tag/v3.0.0
 [2.2.0]: https://github.com/zhihang64/studydash/releases/tag/v2.2.0
 [2.1.0]: https://github.com/zhihang64/studydash/releases/tag/v2.1.0
 [2.0.0]: https://github.com/zhihang64/studydash/releases/tag/v2.0.0

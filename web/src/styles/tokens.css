@@ -1,0 +1,179 @@
+/*
+ * 设计令牌。全站唯一的「颜色/间距/圆角/阴影」来源。
+ *
+ * 规矩：组件样式只准用 var(--…)，不许写死十六进制色值。这样换肤只是换一组变量，
+ * 也才能保证深浅两套主题的对比度都被人审过一遍（下面的取值都过了 WCAG AA：
+ * 正文文字对底 ≥ 4.5:1，大字与图形元件 ≥ 3:1）。
+ *
+ * 主题由 <html data-theme="light|dark"> 决定。判断与写入发生在 index 内联脚本里
+ * （见 src/main.ts 的 applyStoredTheme），所以不会出现浅色闪一下再变深色。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---------- 表面 ---------- */
+  --bg: #f1f4fa;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #eef2f8;
+  --surface-inset: #f8fafc;
+  --overlay: rgba(15, 23, 42, 0.42);
+
+  /* ---------- 描边 ---------- */
+  --border: #e3e8f0;
+  --border-strong: #cbd5e1;
+  --border-subtle: #eef1f6;
+
+  /* ---------- 文字 ---------- */
+  --text: #0f172a;
+  --text-muted: #5b6b80;
+  --text-faint: #8a97a8;
+  --text-on-accent: #ffffff;
+
+  /* ---------- 主色 ---------- */
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-active: #3730a3;
+  --accent-soft: #eef1ff;
+  --accent-border: #c7cdfb;
+
+  /* ---------- 语义状态 ---------- */
+  --ok: #067a55;
+  --ok-soft: #e8f8f1;
+  --ok-border: #a7e3ca;
+  --warn: #a75b06;
+  --warn-soft: #fdf5e6;
+  --warn-border: #f0d59a;
+  --danger: #c2261f;
+  --danger-soft: #fdeeed;
+  --danger-border: #f3bab6;
+  --info: #0b6b9c;
+  --info-soft: #eaf5fb;
+  --info-border: #a8d5ea;
+
+  /* ---------- 阴影 ---------- */
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-2: 0 2px 8px rgba(15, 23, 42, 0.07), 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-3: 0 12px 32px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(15, 23, 42, 0.06);
+  --shadow-4: 0 24px 60px rgba(15, 23, 42, 0.2);
+
+  /* ---------- 焦点 ---------- */
+  --focus: #4f46e5;
+  --focus-ring: 0 0 0 3px rgba(79, 70, 229, 0.35);
+
+  /* ---------- 圆角 ---------- */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-full: 999px;
+
+  /* ---------- 间距 ---------- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 48px;
+
+  /* ---------- 字号 ---------- */
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.8125rem;
+  --fs-md: 0.875rem;
+  --fs-lg: 1rem;
+  --fs-xl: 1.125rem;
+  --fs-2xl: 1.375rem;
+  --fs-3xl: 1.75rem;
+
+  /* ---------- 字体 ---------- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans SC",
+    "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /* ---------- 动效 ---------- */
+  --ease: cubic-bezier(0.2, 0.6, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 280ms;
+
+  /* ---------- 布局 ---------- */
+  --sidebar-w: 15rem;
+  --topbar-h: 3.5rem;
+  --content-max: 86rem;
+  --content-pad: clamp(1rem, 2.4vw, 2rem);
+
+  /* ---------- 层级 ---------- */
+  --z-sticky: 10;
+  --z-sidebar: 30;
+  --z-drawer: 40;
+  --z-modal: 60;
+  --z-toast: 80;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0a1020;
+  --surface: #121a2c;
+  --surface-2: #18213a;
+  --surface-3: #1f2a44;
+  --surface-inset: #0e1626;
+  --overlay: rgba(2, 6, 16, 0.62);
+
+  --border: #253150;
+  --border-strong: #3a4767;
+  --border-subtle: #1d2740;
+
+  --text: #e9eefb;
+  --text-muted: #9aa8c0;
+  --text-faint: #6c7b95;
+  --text-on-accent: #0a1020;
+
+  --accent: #8b93fb;
+  --accent-hover: #a5abfd;
+  --accent-active: #bcc0fe;
+  --accent-soft: #1c2450;
+  --accent-border: #38428a;
+
+  --ok: #4ade9f;
+  --ok-soft: #07271d;
+  --ok-border: #1c5642;
+  --warn: #fbbf3c;
+  --warn-soft: #2b1f06;
+  --warn-border: #6b4f11;
+  --danger: #fb8b84;
+  --danger-soft: #2d1213;
+  --danger-border: #6d2a29;
+  --info: #56c2f0;
+  --info-soft: #06212f;
+  --info-border: #1b556f;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 2px 10px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 14px 36px rgba(0, 0, 0, 0.5);
+  --shadow-4: 0 28px 70px rgba(0, 0, 0, 0.62);
+
+  --focus: #a5abfd;
+  --focus-ring: 0 0 0 3px rgba(139, 147, 251, 0.42);
+}
+
+/* 打印：去掉深色、去掉交互件，只留内容 */
+@media print {
+  :root {
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --surface-2: #ffffff;
+    --surface-3: #ffffff;
+    --shadow-1: none;
+    --shadow-2: none;
+    --shadow-3: none;
+    --shadow-4: none;
+  }
+}

@@ -32,8 +32,8 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import __version__, login, passlogin, qrlogin
-from .aggregate import aggregate, build_payload, summary_lines
+from . import __version__, diagnostics, login, passlogin, qrlogin
+from .aggregate import aggregate, build_payload, demo_courses, summary_lines
 from .log import Log
 from .model import SCHEMA_VERSION, Account, classify_all, iso, now
 from .providers import AccountConfig, HttpSettings, ProviderError, build, discover, ids, metas
@@ -44,6 +44,10 @@ __all__ = ["main", "build_parser"]
 
 FROZEN = bool(getattr(sys, "frozen", False))
 PROG = "studydash"
+
+# 网页版默认端口。双击 exe 与 `studydash web` 用同一个，免得用户记两个数，
+# 端口被占时后端会自己往后找（web/app.py 的 _pick_port）。
+QUICK_PORT = 8788
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +152,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = subs.add_parser("open", parents=[common], help="打开已经生成的看板")
     p.set_defaults(func=cmd_open)
+
+    p = subs.add_parser("web", parents=[common], help="在本机起网页版：浏览器里登录、看板、设置")
+    p.add_argument("--port", type=int, default=QUICK_PORT, help=f"端口（默认 {QUICK_PORT}，被占用会自动往后找）")
+    p.add_argument("--host", default="127.0.0.1", help="监听地址；只接受回环地址")
+    p.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+    p.add_argument("--static-dir", default="", help="用指定目录的前端产物（开发时用）")
+    p.set_defaults(func=cmd_web)
 
     p = subs.add_parser("serve", parents=[common], help="在本机起 HTTP 服务看板")
     p.add_argument("--port", type=int, default=8787, help="端口（默认 8787）")
@@ -593,6 +604,27 @@ def cmd_open(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """起网页版。
+
+    命令行版和网页版共用同一份工作区（config.json / data / out），所以先登录、
+    再来网页里看是没问题的，反过来也行。这里不做任何业务，全交给 ``studydash.web``。
+    """
+    from .web import run as run_web
+
+    ctx = Ctx(args)
+    port = int(getattr(args, "port", QUICK_PORT) or QUICK_PORT)
+    host = _opt(args, "host", "127.0.0.1") or "127.0.0.1"
+    return run_web(
+        home=ctx.workspace.root,
+        port=port,
+        host=host,
+        open_browser=not _flag(args, "no_open"),
+        static_dir=_opt(args, "static_dir") or None,
+        log=ctx.log,
+    )
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import functools
     import http.server
@@ -830,88 +862,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     报错，就没法拿来当 CI 门禁，用户第一次跑也会以为装坏了。
     """
     ctx = Ctx(args)
-    ws = ctx.workspace
-    checks: list[dict[str, Any]] = []
+    items = diagnostics.checks(ctx.workspace, config=ctx.config)
+    failed = diagnostics.failed_names(items)
 
-    def check(name: str, ok: bool, detail: str, fix: str = "", *, level: str = "") -> None:
-        # level 显式给出时以它为准；否则按 ok 折叠成 ok / fail
-        lvl = level or ("ok" if ok else "fail")
-        checks.append(
-            {"name": name, "ok": lvl != "fail", "level": lvl, "detail": detail, "fix": fix}
-        )
-
-    check("Python 版本", sys.version_info >= (3, 10), f"{sys.version.split()[0]}（需要 ≥3.10）")
-
-    if ws.root.exists():
-        check("工作区", True, str(ws.root))
-    else:
-        check("工作区", True, f"{ws.root}（还不存在，首次运行时会自动创建）", level="warn")
-
-    if ws.config_path.exists():
-        check("配置文件", True, str(ws.config_path))
-    else:
-        check(
-            "配置文件",
-            True,
-            f"{ws.config_path} 还没创建",
-            "跑 `studydash init` 生成；只看 `studydash demo` 的话不需要它",
-            level="warn",
-        )
-
-    from . import http as _http
-
-    offenders = _http.assert_readonly()
-    check(
-        "只读约束",
-        not offenders,
-        "没有模块绕开 http 层" if not offenders else f"这些文件直接用了网络库：{offenders}",
-        "只读是这个项目的核心承诺，请改回用 studydash.http",
-    )
-
-    try:
-        template = ws.find_template()
-        size = template.stat().st_size
-        check("渲染模板", True, f"{template}（{size} 字节）")
-    except FileNotFoundError as exc:
-        check("渲染模板", False, str(exc), "确认 templates/dashboard.html 存在")
-
-    discover()
-    loaded = metas()
-    check(
-        "平台适配器",
-        bool(loaded),
-        f"已装载 {len(loaded)} 个：" + ", ".join(m.id for m in loaded),
-    )
-    unverified = [m.name for m in loaded if m.status == "unverified"]
-    if unverified:
-        check(
-            "未验证适配器",
-            True,
-            "、".join(unverified) + " 尚未用真实账号验证过",
-            "取不到数据属正常，跑 `studydash probe <平台>` 留档后提 issue",
-            level="warn",
-        )
-
-    if ws.config_path.exists():
-        accounts = ctx.config.enabled_accounts()
-        with_cookie = [a for a in accounts if a.cookie]
-        check(
-            "账号配置",
-            True,
-            f"启用 {len(accounts)} 个，其中 {len(with_cookie)} 个填了 Cookie",
-            "编辑配置文件的 cookie 字段" if not with_cookie else "",
-            level="ok" if with_cookie else "warn",
-        )
-
-    failed = [c["name"] for c in checks if c["level"] == "fail"]
     if args.json:
-        print(json.dumps(checks, ensure_ascii=False, indent=2))
+        print(json.dumps(items, ensure_ascii=False, indent=2))
         return 1 if failed else 0
 
-    marks = {"ok": "✓", "warn": "!", "fail": "×"}
     ctx.log.info("")
-    for item in checks:
-        ctx.log.info(f"  {marks[item['level']]} {item['name']}：{item['detail']}")
+    for item in items:
+        mark = diagnostics.LEVEL_MARKS[item["level"]]
+        ctx.log.info(f"  {mark} {item['name']}：{item['detail']}")
         if item["level"] != "ok" and item["fix"]:
             ctx.log.info(f"      → {item['fix']}")
     ctx.log.info("")
@@ -927,10 +888,53 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 
 def cmd_quick(args: argparse.Namespace) -> int:
-    """双击 exe 时的默认行为：尽力出一条看板，然后打开。出错要说人话。"""
+    """双击 exe 时的默认行为：把网页版开起来。
+
+    v3 的主界面是网页版，所以双击之后不该是「生成一个静态 HTML 然后用浏览器打开
+    一个文件」，而应该是一个真在跑的本地网页应用：能扫码登录、能刷新数据、能管理
+    账号。静态看板退成兜底——只在网页版依赖缺失或前端产物没打进来时走，并且明确
+    说清为什么退，而不是安静地少一半功能。
+    """
     ctx = Ctx(args)
     ctx.log.info(f"{PROG} {__version__}")
 
+    reason = _web_unavailable()
+    if reason:
+        ctx.log.warn(f"网页版开不起来：{reason}")
+        ctx.log.info("退回静态看板（只能看，不能登录、不能刷新）。")
+        return _quick_static(args, ctx)
+
+    from .web import run as run_web
+
+    return run_web(
+        home=ctx.workspace.root,
+        port=QUICK_PORT,
+        host="127.0.0.1",
+        open_browser=True,
+        log=ctx.log,
+    )
+
+
+def _web_unavailable() -> str:
+    """网页版能不能开？不能就返回一句人能看懂的原因，能就返回空串。
+
+    刻意做在启动之前：让用户在按下回车前就知道自己会看到什么，而不是先蹦一个
+    浏览器窗口再报错。
+    """
+    try:
+        from .web import app as _web_app  # noqa: F401
+    except ImportError as exc:
+        return f'没装网页版依赖（{exc.name or exc}）—— pip install "studydash[web]"'
+
+    static = Path(__file__).resolve().parent / "web" / "static" / "index.html"
+    if not static.exists():
+        return "前端产物没打进来 —— 跑 tools\\build_web.ps1，或换完整安装包"
+
+    return ""
+
+
+def _quick_static(args: argparse.Namespace, ctx: Ctx) -> int:
+    """老路子：抓一次数据、生成静态看板、用浏览器打开那个文件。"""
     try:
         if ctx.workspace.config_path.exists():
             courses, accounts = aggregate(ctx.config, log=ctx.log)
@@ -983,20 +987,7 @@ def _opt(args: argparse.Namespace, name: str, default: str = "") -> str:
 
 
 def _collect_demo(ctx: Ctx):
-    account = AccountConfig(platform="demo", label="内置样例")
-    provider = build(account, ctx.settings(), log=ctx.log)
-    courses = provider.fetch()
-    classify_all(courses, alert_days=ctx.config.alert_days())
-    accounts = [
-        Account(
-            platform="demo",
-            label="内置样例",
-            ok=True,
-            message="",
-            fetched_at=now(),
-            course_count=len(courses),
-        )
-    ]
+    courses, accounts = demo_courses(alert_days=ctx.config.alert_days(), log=ctx.log)
     ctx.log.ok(f"样例数据：{len(courses)} 门课 / {sum(len(c.assignments) for c in courses)} 条作业")
     return courses, accounts
 

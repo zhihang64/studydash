@@ -1,10 +1,15 @@
 # studydash · 学习进度聚合看板
 
-把**不同平台**的学习进度、作业与截止时间读出来，聚合成一个本地 HTML 看板。
+把**不同平台**的学习进度、作业与截止时间读出来，聚合成一个本地页面。
 
 课程散在超星、中国大学 MOOC、智慧树，作业又散在各自的公告和作业页里——这门课
 进度到哪了、哪几个 DDL 快到了，没人替你算。studydash 把这些读到一个页面上：
 整体进度、分项任务点、待办与逾期、DDL 时间轴、平台分布。
+
+**v3 起主界面是网页版**：一条命令（或双击 exe）起一个只跑在本机的网页应用，
+在浏览器里就能扫码登录、刷新数据、管理账号、看五个页面。不需要记命令行参数，
+也不需要先装 Python —— 打包版已经带好了。想要「一个 HTML 文件」那种用法的话，
+静态看板仍然在（`studydash all`），只是退成了兜底。
 
 ![看板预览（浅色）](docs/preview-light.png)
 
@@ -101,6 +106,63 @@ studydash demo --open
 
 内置 6 门课 / 10 条作业的样例数据，覆盖已逾期、今天到期、远期、无截止、已评分等
 各种状态，用来确认看板本身跑得通。不联网、不需要账号。
+
+---
+
+## 网页版（推荐）
+
+不用记命令、不用开命令行窗口。**双击 exe** 就是这个：起一个只跑在本机的网页应用，
+用默认浏览器打开 `http://127.0.0.1:8788`。
+
+命令行版同一个东西：
+
+```bash
+studydash web            # 起服务并打开浏览器
+studydash web --no-open  # 只起服务（CI / 远程桌面里用）
+studydash web --port 9000
+```
+
+### 五个页面
+
+| 页面 | 干什么 |
+| --- | --- |
+| **总览** | 6 张 KPI、平台分布、最要紧的几件、进度告急的几门课 |
+| **待办** | 按 已逾期 / 3 天内 / 7 天内 / …… 分组的 DDL 时间轴，可按平台筛 |
+| **课程** | 搜索 + 排序 + 平台筛选；每门课带分项进度条和可展开的作业明细 |
+| **账号** | 在页面里登录绑账号、启用/停用、删账号、单独抓某个平台、探测接口 |
+| **设置** | 深浅主题、抓取参数（超时/限速/重试）、提醒阈值、环境自检 |
+
+### 在页面里登录
+
+「账号」页有四个页签，**默认是扫码**：
+
+1. **扫码** —— 页面上直接出二维码，手机「学习通」App 扫一下就登上了。约两分钟
+   过期，程序自动换一张。
+2. **账号密码** —— 输账号和密码。密码走 `password` 类型输入框，提交后立刻从内存
+   清掉，不进配置、不进日志、不进任务快照。
+3. **粘贴 Cookie** —— 你已经有 Cookie 的话直接贴。
+4. **本机浏览器** —— 从你日常浏览器里读（要先完全退出它，见下面「隐私」）。
+
+登录是**后台任务**：进度、日志、二维码都通过 SSE 实时推到页面上，可以关掉抽屉去
+看别的，任务在后台继续跑。平台要图形验证码或二次验证时会明确告诉你「改用扫码」，
+不会去猜验证码。
+
+### 为什么它敢把登录放在网页里
+
+一个网页能操作你的账号，通常意味着它能被别的网页借道攻击。这里的三条约束是写进
+代码的，不是靠自觉：
+
+- **只监听回环地址**（`127.0.0.1`）。`--host` 传非回环地址会**直接拒绝启动**。
+- **每个请求都校验来源 IP 是回环**，不是回环就 `403`。
+- **不用 Cookie 会话**，所以没有 CSRF 面。令牌每次启动重新生成，通过
+  `<script>window.__STUDYDASH__</script>` 注入 index.html，之后每个 `/api/*` 请求
+  都要带 `x-studydash-token` 头。令牌只在你自己打开的这个页面里，别的站点拿不到
+  （同源策略 + 自定义头预检）。
+- 交互式 API 文档（`/docs`、`/openapi.json`）在网页版里是**关掉的**，免得把整张
+  接口表摊在页面上。
+
+接口契约（错误码、任务状态机、SSE 事件格式、每个端点的字段）在
+[docs/web-api.md](docs/web-api.md)，前端 `web/` 照着它写。
 
 ---
 
@@ -375,13 +437,29 @@ studydash/
 │   ├── htmlx.py         极简 HTML 解析器（替掉 lxml 依赖）
 │   ├── store.py         工作区、配置、模板查找、原子写
 │   ├── aggregate.py     逐平台抓取 → 聚合 → payload
-│   ├── render.py        注入 payload，转义
+│   ├── render.py        注入 payload，转义（静态看板用）
 │   ├── log.py           零依赖日志
-│   ├── templates/dashboard.html   看板模板（单文件自包含）
+│   ├── diagnostics.py   `doctor` 的自检项（CLI 与网页版共用一套判断）
+│   ├── login.py         会话获取与校验（六种来源的调度层）
+│   ├── qrlogin.py       超星扫码登录协议        ┐
+│   ├── passlogin.py     超星账号密码登录         ├─ 让工具自己走完登录
+│   ├── qr.py            零依赖二维码解码 + 终端渲染 │
+│   ├── aes.py           纯 Python AES-128-CBC    ┘
+│   ├── browsers.py      读浏览器 Cookie（DPAPI + AES-GCM）
+│   ├── cdp.py           本机浏览器调试端口客户端（唯一允许直连的例外）
+│   ├── web/             网页版后端（FastAPI）
+│   │   ├── app.py       应用装配、鉴权中间件、SPA 回退
+│   │   ├── security.py  令牌与回环校验
+│   │   ├── tasks.py     任务状态机 + 事件流
+│   │   ├── operations.py 7 种任务的实现
+│   │   ├── routers/     system / accounts / tasks / data
+│   │   └── static/      前端构建产物（要进仓库）
+│   ├── templates/dashboard.html   静态看板模板（单文件自包含）
 │   └── providers/       适配器：chaoxing / icourse163 / zhihuishu / manual / demo
-├── tests/               192 个用例（pytest）
-├── docs/                payload 契约、插件文档、预览图
-├── tools/               图标生成、PyInstaller 入口、打包脚本、版本资源模板
+├── web/                 Vue 3 + TypeScript 前端源码（Vite）
+├── tests/               435 个用例（pytest）
+├── docs/                payload 契约、web API 契约、插件文档、预览图
+├── tools/               图标生成、PyInstaller 入口、前端/打包脚本、版本资源模板
 ├── assets/              icon.png / icon.ico（由 tools/make_icon.py 生成）
 ├── config.example.json  配置样例
 └── pyproject.toml
@@ -416,12 +494,14 @@ PyInstaller 出单文件；适配器就是几十行的类，谁都能写一个 P
 
 ```bash
 python -m pip install pillow pyinstaller
+pwsh -File tools\build_web.ps1               # 先构建前端（npm ci + vite build）
 pwsh -File tools\build_exe.ps1              # 默认同时出 onedir 和 onefile
 pwsh -File tools\build_exe.ps1 -Mode onedir # 只出文件夹版
 ```
 
-脚本会先画图标（纯代码绘制，无需外部素材），再用 `tools/entry.py` 打包，最后打印
-体积、SHA256 和版本资源。
+`build_web.ps1` 把 Vue 应用构建到 `src/studydash/web/static/`，**产物要进仓库**
+（不然 `pip install` 完还得让用户自己装 Node）。`build_exe.ps1` 会先画图标（纯代码
+绘制，无需外部素材），再用 `tools/entry.py` 打包，最后打印体积、SHA256 和版本资源。
 
 > 打包踩坑：PyInstaller 一旦指定 `--specpath`，`--icon` / `--add-data` /
 > `--version-file` 都会相对 **spec 所在目录**解析，必须传绝对路径，否则报
@@ -430,35 +510,38 @@ pwsh -File tools\build_exe.ps1 -Mode onedir # 只出文件夹版
 ## 测试
 
 ```bash
-python -m pytest          # 192 个用例
+python -m pytest          # 435 个用例
 python -m ruff check .    # 可选：装了 lint 依赖
 ```
 
 用例覆盖：数据模型与派生计算、HTML 解析器、只读网络层（含白名单拒绝路径）、
-工作区与配置脱敏、聚合的失败隔离、渲染转义、适配器注册表、CLI 子命令契约。
+工作区与配置脱敏、聚合的失败隔离、渲染转义、适配器注册表、CLI 子命令契约、
+纯 Python AES 与二维码编解码（含 FIPS-197 标准答案和「渲染→反解→逐格比对」往返）、
+浏览器 Cookie 解密与 CDP 客户端、以及网页版后端（鉴权、任务状态机、SSE、
+每个端点的字段契约）。
 
 ---
 
 ## 版本与发布
 
-当前版本 **v2.0.0**，更新内容见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **v3.0.0**，更新内容见 [CHANGELOG.md](CHANGELOG.md)。
 
 **版本号只有一处源头**：`src/studydash/__init__.py` 的 `__version__`。
-`pyproject.toml` 动态读它，exe 的 Windows 版本资源由
-`tools/version_info.tmpl.txt` 在打包时渲染成 `build/version_info.txt`——
+`pyproject.toml` 动态读它，前端 `web/package.json` 与 exe 的 Windows 版本资源都由
+构建脚本填（`tools/version_info.tmpl.txt` 在打包时渲染成 `build/version_info.txt`）——
 不再有「三处手改走样」的问题。
 
 发版：
 
 ```bash
-git commit -am "chore: 升到 v2.1.0"
-git tag -a v2.1.0 -m "v2.1.0"
-git push origin main v2.1.0
+git commit -am "chore: 升到 v3.1.0"
+git tag -a v3.1.0 -m "v3.1.0"
+git push origin main v3.1.0
 ```
 
 推 `v*` 标签会触发 [`.github/workflows/build-exe.yml`](.github/workflows/build-exe.yml)：
-在 windows-latest 上跑测试 → 打包两种产物 → 在干净目录做冒烟测试 → 挂到同名 Release。
-手动触发（workflow_dispatch）只出 artifact，不发 Release。
+在 windows-latest 上跑测试 → 构建前端 → 打包两种产物 → 在干净目录做冒烟测试 →
+挂到同名 Release。手动触发（workflow_dispatch）只出 artifact，不发 Release。
 
 ---
 
@@ -474,6 +557,9 @@ git push origin main v2.1.0
 - **列表页通常只给总百分比**，不给分项任务点数，也不给 DDL。这类数据要看板显示，
   得靠手动导入补——把散落各处的 deadline 拢到一处，本身就是这个工具最值钱的部分。
 - **静态看板**：数据在渲染时内嵌，刷新页面不会重新抓取；更新要重跑 `build`/`fetch`。
+  网页版没有这个问题（每次都读最新的 `data/progress.json`）。
+- **网页版只能本机访问**。想从手机看，用 `studydash serve`——它只发布静态看板，
+  不发布会话。这是刻意的取舍，不是没做。
 - exe 未做代码签名，SmartScreen 可能提示未知发布者；未适配 macOS/Linux 的打包。
 
 ## 隐私
@@ -492,6 +578,18 @@ git push origin main v2.1.0
   AES-128-CBC 加密发出；**不落盘、不写日志**。`config.json` 里永远只有会话 Cookie。
 - **不代过验证码和二次验证。** 平台要求这些时程序会明确拒绝并建议改用扫码，
   而不是去猜、去绕。
+
+**关于网页版**（`studydash web` / 双击 exe）：
+
+- 服务**只监听 `127.0.0.1`**，并逐请求校验来源是回环；`--host` 传别的地址直接拒绝启动。
+- 令牌每次启动重新生成、只注入到你打开的那个页面里；**不用 Cookie 会话**，所以没有
+  CSRF 面。别的网站既读不到这个令牌，也没法带自定义头跨域请求。
+- 账号列表接口只回 `cookie_hint`（形如 `<已设置 412 字符>`），**任何接口都不返回
+  Cookie 的值**。
+- 密码登录走任务通道：密码读完立刻从任务选项里删掉，不进 `/api/tasks` 的响应、
+  不进日志、不落盘。
+- 关掉浏览器标签不会留下后台服务吗？——不会。服务跟着你启动 `studydash web` 的那个
+  进程活着，Ctrl+C（或关掉那个窗口）就结束。
 
 **关于读浏览器 Cookie**（`studydash login` 的 `live` / `browser` 两种来源）：
 

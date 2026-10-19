@@ -28,7 +28,9 @@ from .model import (
     sort_assignments,
 )
 from .providers import (
+    AccountConfig,
     AuthError,
+    HttpSettings,
     Provider,
     ProviderError,
     build,
@@ -37,7 +39,7 @@ from .providers import (
 )
 from .store import Config
 
-__all__ = ["aggregate", "build_payload", "summary_lines"]
+__all__ = ["aggregate", "build_payload", "demo_courses", "summary_lines"]
 
 STATUS_ORDER = {"overdue": 0, "urgent": 1, "soon": 2, "later": 3, "none": 4, "done": 5}
 
@@ -147,6 +149,37 @@ def aggregate(
 
     classify_all(courses, alert_days=config.alert_days())
     return courses, results
+
+
+# --------------------------------------------------------------------------- #
+# 演示数据
+# --------------------------------------------------------------------------- #
+
+def demo_courses(
+    *,
+    alert_days: float = 3.0,
+    log: Log | None = None,
+) -> tuple[list[Course], list[Account]]:
+    """内置演示数据。
+
+    命令行的 ``studydash demo`` 与网页版的「先看看演示数据」共用这一份，
+    免得两边的样例各长各的、用户看到的东西对不上。
+    """
+    account = AccountConfig(platform="demo", label="内置样例")
+    provider = build(account, HttpSettings(), log=log or Log(quiet=True))
+    courses = provider.fetch()
+    classify_all(courses, alert_days=alert_days)
+    accounts = [
+        Account(
+            platform="demo",
+            label="内置样例",
+            ok=True,
+            message="",
+            fetched_at=now(),
+            course_count=len(courses),
+        )
+    ]
+    return courses, accounts
 
 
 # --------------------------------------------------------------------------- #

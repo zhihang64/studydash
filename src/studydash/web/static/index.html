@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>studydash · 学习进度聚合看板</title>
+
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 21V14M16 21V10M23 21V16' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+
+    <!--
+      后端起服务时会把下面这一行替换成真正的启动参数（访问令牌 / 版本 / 基路径）。
+      它本身是合法的 JS，所以被替换之前直接打开这个文件也不会报错——前端读到
+      null 就知道「不是从 studydash 启动的」，会显示提示而不是白屏。
+    -->
+    <script>
+      window.__STUDYDASH__ = null;
+    </script>
+
+    <script>
+      // 双击 dist/index.html（file://）时模块脚本会被浏览器当跨源拦掉。
+      // 与其白屏，不如直接说清楚该怎么办。
+      if (location.protocol === 'file:') {
+        document.addEventListener('DOMContentLoaded', function () {
+          var host = document.getElementById('app');
+          if (!host) return;
+          var box = document.createElement('div');
+          box.style.cssText =
+            'max-width:34rem;margin:14vh auto;padding:2rem;border-radius:14px;' +
+            'font:15px/1.8 system-ui,sans-serif;background:#fff;color:#1e293b;' +
+            'box-shadow:0 12px 40px rgba(15,23,42,.12)';
+          var title = document.createElement('h1');
+          title.style.cssText = 'margin:0 0 .6rem;font-size:1.15rem';
+          title.textContent = '这个页面要通过 studydash 启动';
+          var body = document.createElement('p');
+          body.style.cssText = 'margin:0;color:#475569';
+          body.textContent =
+            '前端要连本机的后端服务，直接双击打开 HTML 拿不到数据和访问令牌。' +
+            '请在命令行里跑 studydash web，浏览器会自动打开正确的地址。';
+          box.append(title, body);
+          host.replaceChildren(box);
+        });
+      }
+    </script>
+    <script type="module" crossorigin src="/assets/index-DHxS3Vio.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-CPwG9svG.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-B1fYrLEV.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
