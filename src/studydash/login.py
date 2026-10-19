@@ -247,8 +247,10 @@ def from_live(
             getattr(log, level, log.info)(message)
 
     launched = cdp.launch(LOGIN_HOME, browser=browser, port=port, profile_root=profile_root)
-    say(f"已用{browser}打开登录页（独立窗口，不影响你原来的浏览器）。")
-    say("请在那个窗口里登录超星学习通，登进去之后不用管，我会自动取到会话。")
+    say(f"已用{browser}打开登录页（独立配置档，不影响你原来开着的浏览器）。")
+    say(f"配置档位置：{launched.profile_root}")
+    say("请在那个窗口里登录超星学习通；登进去之后不用管，我会自动取到会话并关掉这个窗口。")
+    say("（这个配置档会留着，所以下次登录不用再登一遍。不想留可以直接删掉上面那个目录。）")
     deadline = time.monotonic() + timeout
     try:
         while time.monotonic() < deadline:
