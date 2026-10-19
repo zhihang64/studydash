@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import struct
 import zlib
+from typing import Any
 
 import pytest
 
@@ -300,3 +301,50 @@ def test_module_sizes_are_all_legal_qr_versions() -> None:
     assert qr.MODULE_SIZES[-1] == 177
     assert all((n - 17) % 4 == 0 for n in qr.MODULE_SIZES)
     assert len(qr.MODULE_SIZES) == 40
+
+
+# --------------------------------------------------------------------------- #
+# color=None 的自动判断：真终端上色，重定向/管道退成纯字符
+# --------------------------------------------------------------------------- #
+class _FakeSys:
+    """只为替换 ``qr.sys`` 用，免得 monkeypatch 去动真的 ``sys.stdout``。"""
+
+    def __init__(self, stdout: Any) -> None:
+        self.stdout = stdout
+
+
+class _Tty:
+    def isatty(self) -> bool:
+        return True
+
+
+class _Pipe:
+    def isatty(self) -> bool:
+        return False
+
+
+def test_render_matrix_auto_color_follows_isatty(monkeypatch: pytest.MonkeyPatch) -> None:
+    matrix = sample_matrix(21)
+
+    monkeypatch.setattr(qr, "sys", _FakeSys(_Tty()))
+    assert qr.terminal_supports_color() is True
+    assert "\x1b[" in qr.render_matrix(matrix), "真终端上应该用 ANSI 明确画黑白底"
+
+    monkeypatch.setattr(qr, "sys", _FakeSys(_Pipe()))
+    assert qr.terminal_supports_color() is False
+    assert "\x1b[" not in qr.render_matrix(matrix), "重定向/管道里不该有转义序列"
+    assert qr.render_matrix(matrix) == qr.render_matrix(matrix, color=False)
+
+
+def test_terminal_supports_color_survives_odd_streams(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    class NoIsatty:
+        pass
+
+    class Angry:
+        def isatty(self) -> bool:
+            raise ValueError("I/O operation on closed file")
+
+    for stream in (NoIsatty(), Angry(), None):
+        monkeypatch.setattr(qr, "sys", _FakeSys(stream))
+        assert qr.terminal_supports_color() is False

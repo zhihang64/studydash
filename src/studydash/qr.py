@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import struct
+import sys
 import zlib
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "matrix_from_png",
     "render_matrix",
     "render_png",
+    "terminal_supports_color",
     "MODULE_SIZES",
 ]
 
@@ -227,8 +229,23 @@ def matrix_from_png(data: bytes, *, max_modules: int = 177) -> list[list[bool]]:
 # --------------------------------------------------------------------------- #
 # 终端渲染
 # --------------------------------------------------------------------------- #
+def terminal_supports_color() -> bool:
+    """当前 stdout 是不是一个真终端。
+
+    被重定向到文件、或接进管道时返回 ``False``：ANSI 转义序列在那两种场合没有意义，
+    只会把文件变成一堆 ``\\x1b[30m``。``color=None``（默认）就是拿这个判断来决定的。
+    """
+    stream = sys.stdout
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def render_matrix(matrix: list[list[bool]], *, margin: int = 2,
-                  color: bool = True, invert: bool = False) -> str:
+                  color: bool | None = None, invert: bool = False) -> str:
     """把模块矩阵画成可扫描的终端文本。
 
     ``margin`` 是静默区（模块数）。规范要求 4，但终端里白边太浪费——一共两列就够
@@ -236,7 +253,11 @@ def render_matrix(matrix: list[list[bool]], *, margin: int = 2,
 
     ``color=True`` 用 ANSI 明确画黑白底，深色主题的终端也不会把码画反；
     ``color=False`` 退化成纯字符，适合同步到聊天窗口或日志。
+    ``color=None``（默认）交给 :func:`terminal_supports_color` 判断——真终端上色，
+    重定向/管道里退成纯字符。
     """
+    if color is None:
+        color = terminal_supports_color()
     if not matrix:
         raise QrError("空的模块矩阵")
 
