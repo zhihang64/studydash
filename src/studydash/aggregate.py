@@ -286,6 +286,11 @@ def _course_card(course: Course, ref: datetime) -> dict[str, Any]:
     # 而是「适配器没取到数据」。两者在界面上必须能分开，否则用户会以为自己一节课没上。
     # overview.avg_progress 早就把这类课排除在外了（见上面的 ratios），这里补上卡片侧。
     data["has_data"] = bool(course.progress or course.assignments)
+    # 超星旧版课程页只写「还有 N 个任务点」，不给总数（knowledgeJobCount 就是余量，
+    # 不是总量，别拿它当分母）。这种课算不出百分比，但 N 仍然值得展示。
+    pending = course.extra.get("task_points_pending")
+    if isinstance(pending, int) and pending > 0 and not course.progress:
+        data["pending_points"] = pending
     # 每门课单独算一次「当前最扎眼的状态」，前端不用自己推导
     states = [a.state for a in course.assignments]
     if "overdue" in states:

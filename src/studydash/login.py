@@ -34,12 +34,27 @@ from .store import Config
 # 常量
 # --------------------------------------------------------------------------- #
 
-#: 登录态自检地址：未登录会返回登录页而不是 302，所以要看正文判断。
-LOGIN_CHECK = "https://i.chaoxing.com/base/settings"
+#: 登录态自检地址。
+#:
+#: 挑这个地址的唯一标准是「登录与否，响应长得不一样」：它是抓课程列表用的同一个
+#: 端点，未登录时把登录页当 200 直接回给（实测 33990 字节、title 用户登录、
+#: 有密码框、**没有** courseList），已登录才有 <ul id="courseList">（实测 126612
+#: 字节、52 个 <li>）。
+#:
+#: 早期这里用的是 i.chaoxing.com/base/settings，它对**完全有效的会话**也返回登录页
+#: （2026-10-19 实测 33302 字节、title 用户登录），于是每个真账号都被判成过期，
+#: 界面永远显示「登录态失效」而数据其实完全抓得到。
+LOGIN_CHECK = (
+    "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courses/list"
+    "?rss=1&start=0&size=500&catalogId=0&searchname="
+)
 #: 打开这个地址，浏览器会自己跳去登录页（如果没登录）。
 LOGIN_HOME = "https://i.chaoxing.com/base"
 
 RE_UID = re.compile(r"_uid=(\d+)")
+#: 课程列表容器。这个端点的正常响应一定带它，登录页一定没有——比任何关键词
+#: 命中都干净，所以拿它当「确实拿到列表页」的判据。
+RE_COURSE_LIST = re.compile(r"id=[\"']courseList[\"']", re.I)
 RE_D = re.compile(r"(?:^|;)\s*_d=")
 RE_COOKIE_PAIR = re.compile(r"^\s*([^=\s;]+)\s*=\s*(.*?)\s*$")
 RE_JSESSIONID_IN_URL = re.compile(r"jsessionid=([0-9A-Fa-f]{16,})")
@@ -360,6 +375,18 @@ def check(cookie: str, *, timeout: float = 10.0, log=None) -> Session:
             ok=False,
             message=f"服务端返回的是登录页（命中结构特征 {evidence}），这个会话不管用{tail}",
         )
+    # 走到这里说明不是登录页。这个端点的正常响应一定带课程列表容器；没有它
+    # 说明既没登录页也没列表（平台改版或被中间设备改写），照实说，别猜成过期。
+    if not RE_COURSE_LIST.search(html):
+        return Session(
+            cookie=cookie,
+            source="",
+            ok=False,
+            message=(
+                f"响应不是登录页，但里面没有课程列表容器（{len(html)} 字节）；"
+                "可能是平台改版，跑 `studydash probe chaoxing` 留档看看"
+            ),
+        )
 
     uid = uid_from_cookie(cookie)
     if not uid:
@@ -377,9 +404,18 @@ def check(cookie: str, *, timeout: float = 10.0, log=None) -> Session:
             cookie=cookie,
             source="",
             cookie_count=count,
-            message="能连上，但页面里没看到 _uid；先按可用处理，抓取时若被踢回登录页会明确报错",
+            message=(
+                f"会话可用（课程列表页 {len(html) // 1024} KB）；"
+                "页面里没有 _uid，靠课程列表容器确认的登录态"
+            ),
         )
-    return Session(cookie=cookie, source="", uid=uid, cookie_count=count, message="会话可用")
+    return Session(
+        cookie=cookie,
+        source="",
+        uid=uid,
+        cookie_count=count,
+        message=f"会话可用（课程列表页 {len(html) // 1024} KB）",
+    )
 
 
 # --------------------------------------------------------------------------- #

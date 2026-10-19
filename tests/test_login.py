@@ -174,22 +174,31 @@ def test_check_explains_which_cookie_field_is_missing(fake_http):
 
 
 
+#: 「已登录」响应必须带的东西。登录态自检打的是课程列表端点，正常响应一定含
+#: ``<ul id="courseList">``，登录页一定没有——所以凡是声称「已登录」的假响应都得
+#: 带上它，否则测的不是真实契约。
+_LIST_UL = (
+    '<ul class="course-list" id="courseList">'
+    '<li><a href="/mycourse/studentcourse?courseid=1">课程一</a></li></ul>'
+)
+
+
 def test_check_does_not_false_positive_on_settings_password_box(fake_http):
-    """回归：我们检查的是「设置」页，那里可能真的有修改密码的密码框。
+    """回归：页面里出现密码框不等于登录页。
 
     若判据只是 ``type="password"`` + ``id="pwd"``，真实账号登录成功后也会被
-    判成「会话不管用」——把用户报的 bug 换个形式留着。标题不是登录页即可放行。
+    判成「会话不管用」——把用户报的 bug 换个形式留着。
     """
     fake_http(
         _Resp(
             text='<html><head><title>账号设置</title></head><body>'
             '<form id="chpwd"><input type="password" name="oldpwd" id="pwd">'
             '<input type="password" name="newpwd" id="newpwd"></form>'
-            '<a href="/passport2/logout">退出</a></body></html>'
+            '<a href="/passport2/logout">退出</a>' + _LIST_UL + "</body></html>"
         )
     )
     result = login.check("_uid=1")
-    assert result.ok is True, f"设置页里的密码框不该被判成登录页：{result.message}"
+    assert result.ok is True, f"非登录页里的密码框不该被判成登录页：{result.message}"
 
 
 def test_check_detects_login_page(fake_http):
@@ -225,7 +234,7 @@ def test_check_does_not_false_positive_on_passport_words(fake_http):
             text="<html><head><title>学习通</title>"
             '<link href="https://passport2.chaoxing.com/favicon.ico">'
             '<a href="/logout">用户登录/退出</a></head>'
-            "<body>我的课程</body></html>"
+            "<body>我的课程" + _LIST_UL + "</body></html>"
         )
     )
     result = login.check("_uid=123456; _d=abc")
@@ -240,7 +249,7 @@ def test_check_detects_redirect_to_passport(fake_http):
 
 
 def test_check_accepts_uid_from_cookie(fake_http):
-    fake_http(_Resp(text="<html>设置</html>"))
+    fake_http(_Resp(text="<html>我的课程" + _LIST_UL + "</html>"))
     result = login.check("_uid=123456; _d=abc")
     assert result.ok is True
     assert result.uid == "123456"
@@ -249,30 +258,48 @@ def test_check_accepts_uid_from_cookie(fake_http):
 
 def test_check_accepts_uid_from_html(fake_http):
     """有些响应不带 Cookie、只在正文回显 _uid，这种情况也算登录上了。"""
-    fake_http(_Resp(text="<script>var x='_uid=7654321;';</script>"))
+    fake_http(
+        _Resp(text="<script>var x='_uid=7654321;';</script><html>" + _LIST_UL + "</html>")
+    )
     result = login.check("_d=abc")
     assert result.ok is True
     assert result.uid == "7654321"
 
 
 def test_check_without_uid_still_usable(fake_http):
-    """页面上找不到 _uid 不等于会话失效——交给真正的抓取去定论。
+    """页面上找不到 _uid 不等于会话失效——列表容器在就算登录上了。
 
     回归：原先这里直接判 ``ok=False``，等于拿「没找到证据」当成「找到反证」。
     uid 由前端脚本另外取、或者干脆没渲染出来的页面很常见，一判死就会变成
     「登录明明成功，工具说会话不管用」。
     """
-    fake_http(_Resp(text="<html>看不懂的页面</html>"))
+    fake_http(_Resp(text="<html>我的课程" + _LIST_UL + "</html>"))
     result = login.check("_d=abc")
     assert result.ok is True
     assert result.uid == ""
     assert "_uid" in result.message
 
 
-def test_check_queries_the_settings_url(fake_http):
-    client = fake_http(_Resp(text="_uid=1"))
+def test_check_flags_page_without_course_list(fake_http):
+    """既不是登录页、也没有课程列表容器：照实说，别猜成「会话过期」。"""
+    fake_http(_Resp(text="<html>看不懂的页面</html>"))
+    result = login.check("_uid=1")
+    assert result.ok is False
+    assert "课程列表容器" in result.message
+    assert "过期" not in result.message
+
+
+def test_check_queries_the_course_list_url(fake_http):
+    """回归：自检地址必须是「只有登录后才有内容」的那个。
+
+    i.chaoxing.com/base/settings 对**有效会话**也返回登录页（实测 33302 字节、
+    title 用户登录），拿它自检等于把每个真账号都判成过期。
+    """
+    client = fake_http(_Resp(text="_uid=1" + _LIST_UL))
     login.check("_uid=1")
     assert client.asked == [login.LOGIN_CHECK]
+    assert "mooc2-ans.chaoxing.com" in login.LOGIN_CHECK
+    assert "base/settings" not in login.LOGIN_CHECK
 
 
 # --------------------------------------------------------------------------- #

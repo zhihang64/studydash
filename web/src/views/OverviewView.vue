@@ -49,6 +49,21 @@ const urgent = computed<AssignmentView[]>(() =>
   dash.timeline.filter((a) => a.state === 'overdue' || a.state === 'urgent').slice(0, 6),
 )
 
+/**
+ * 「进度告急」：有数据、且还没学完的课，按进度从低到高取前 4 门。
+ *
+ * 两个都不能省：
+ *  - **必须真排序**。之前直接 `filter(has_data).slice(0,4)`，标题写着「进度最低的
+ *    几门」，实际给的是原始顺序，0% 后面跟着一串 100%；
+ *  - **必须排除已学完的**。100% 的课挂在「告急」里只会让人以为自己漏看了什么。
+ */
+const behind = computed(() =>
+  dash.visibleCourses
+    .filter((c) => c.has_data && (c.ratio ?? 0) < 1)
+    .sort((a, b) => (a.ratio ?? 0) - (b.ratio ?? 0))
+    .slice(0, 4),
+)
+
 const fetching = computed(() =>
   tasks.active.some((t) => t.kind === 'fetch'),
 )
@@ -242,7 +257,7 @@ defineExpose({ fetchNow })
       </section>
 
       <!-- 进度最低的几门 -->
-      <section class="card" aria-labelledby="behind-title">
+      <section v-if="behind.length" class="card" aria-labelledby="behind-title">
         <header class="card__head">
           <h2 id="behind-title" class="card__title">
             进度告急
@@ -252,7 +267,7 @@ defineExpose({ fetchNow })
         </header>
 
         <div class="behind">
-          <article v-for="course in dash.visibleCourses.filter((c) => c.has_data).slice(0, 4)" :key="course.platform + course.id" class="behind__item">
+          <article v-for="course in behind" :key="course.platform + course.id" class="behind__item">
             <div class="behind__head">
               <PlatformChip :platform="course.platform" :name="course.platform_name" size="sm" />
               <span class="behind__name truncate" :title="course.name">{{ course.name }}</span>

@@ -42,11 +42,30 @@ const pendingAssignments = computed(() =>
 
 const hasParts = computed(() => props.course.progress_parts.length > 0)
 
-const emptyPartHint = computed(() =>
-  hasData.value
-    ? '这门课没有细分进度数据，只有总进度。'
-    : '适配器没有取到这门课的进度或作业数据。',
+// 「已全部完成」必须看比例，不能看「有没有数据」。
+// 回归：早先写成 `v-else-if="hasData"`，于是任务点 0/77 的课也顶着
+// 「已全部完成」的绿标、右边大数字却是 0%——两个结论直接打架。
+const complete = computed(
+  () => hasData.value && (props.course.ratio ?? 0) >= 1,
 )
+
+// 只有一个进度项时，总进度条和它下面的那一行说的是同一件事
+// （「总进度 100%」+「任务点 100/100 100%」），去掉总进度条，留下带明细的那行。
+const showSummaryBar = computed(
+  () => hasData.value && props.course.progress_parts.length !== 1,
+)
+
+// 有些课（超星旧版课程页）只公布「还剩几个任务点」，不公布总任务点数。
+// 这种课算不出百分比，但「还剩 14 个」本身就有用，别让它退化成一句「无数据」。
+const pendingPoints = computed(() => Number(props.course.pending_points) || 0)
+
+const emptyPartHint = computed(() => {
+  if (hasData.value) return '这门课没有细分进度数据，只有总进度。'
+  if (pendingPoints.value > 0) {
+    return `这门课只公布了「还有 ${pendingPoints.value} 个任务点待完成」，没给总数，所以算不出百分比。`
+  }
+  return '适配器没有取到这门课的进度或作业数据。'
+})
 </script>
 
 <template>
@@ -57,7 +76,9 @@ const emptyPartHint = computed(() =>
           <PlatformChip :platform="course.platform" :name="course.platform_name" color="" />
           <span v-if="course.overdue" class="pill pill--danger">逾期 {{ course.overdue }}</span>
           <span v-else-if="course.pending" class="pill pill--warn">待办 {{ course.pending }}</span>
-          <span v-else-if="hasData" class="pill pill--ok">已全部完成</span>
+          <span v-else-if="complete" class="pill pill--ok">已全部完成</span>
+          <span v-else-if="hasData" class="pill pill--neutral">进行中</span>
+          <span v-else-if="pendingPoints" class="pill pill--warn">剩 {{ pendingPoints }} 任务点</span>
           <span v-else class="pill pill--neutral">无进度数据</span>
         </div>
 
@@ -78,7 +99,7 @@ const emptyPartHint = computed(() =>
       </p>
     </header>
 
-    <div v-if="hasData" class="course__bar">
+    <div v-if="showSummaryBar" class="course__bar">
       <ProgressBar :ratio="course.ratio" label="总进度" size="sm" show-value />
     </div>
 

@@ -294,3 +294,41 @@ def test_course_with_only_assignments_counts_as_having_data(config):
     payload = build_payload(courses, [], config)
     assert payload["courses"][0]["has_data"] is True
     assert payload["overview"]["avg_progress"] == pytest.approx(1.0, abs=1e-3)
+
+
+def test_pending_points_surfaces_when_only_remainder_is_known(config):
+    """平台只给「还剩 N 个任务点」时，把 N 透出来，别把整门课压成一句「无数据」。
+
+    这是超星旧版课程页的真实形状：表头没有「已完成任务点 X/Y」，
+    每个章节节点上只有余量（``knowledgeJobCount`` 就是余量，不是总量），
+    所以算不出百分比——但「还剩 14 个」对用户是有信息量的。
+    """
+    courses = [
+        make_course("c1", name="只给余量", platform="chaoxing", progress=[], assignments=[]),
+    ]
+    courses[0].extra["task_points_pending"] = 14
+    payload = build_payload(courses, [], config)
+    card = payload["courses"][0]
+
+    assert card["has_data"] is False      # 仍然算不出百分比
+    assert card["pending_points"] == 14   # 但余量要透出来
+
+
+def test_pending_points_hidden_when_real_progress_exists(config):
+    """有百分比的时候不提余量——两个数字并排只会让人以为哪个算错了。"""
+    courses = [
+        make_course("c1", platform="chaoxing", progress=[Progress("任务点", 3, 4)]),
+    ]
+    courses[0].extra["task_points_pending"] = 1
+    payload = build_payload(courses, [], config)
+    assert "pending_points" not in payload["courses"][0]
+
+
+def test_pending_points_zero_is_not_reported(config):
+    """余量为 0（这门课本来就没有任务点）时不要挂个 0 出来冒充信息。"""
+    courses = [
+        make_course("c1", platform="chaoxing", progress=[], assignments=[]),
+    ]
+    courses[0].extra["task_points_pending"] = 0
+    payload = build_payload(courses, [], config)
+    assert "pending_points" not in payload["courses"][0]

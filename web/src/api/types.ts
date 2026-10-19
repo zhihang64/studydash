@@ -240,6 +240,11 @@ export interface CourseView {
    * 「适配器没取到」和「真的一分没学」是两回事。
    */
   has_data: boolean
+  /**
+   * 只在这种情况出现：平台只公布了「还有 N 个任务点」，没给总数。
+   * 有它的时候 ratio 仍是 null，但它比一句「无数据」有用得多。
+   */
+  pending_points?: number
 }
 
 export interface PlatformCard {
