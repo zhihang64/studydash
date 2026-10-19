@@ -25,8 +25,12 @@
 
 **只读承诺**（这条是硬约束，写进了代码而不是文档）：
 
-- 唯一的网络出口是 `src/studydash/http.py`，别处不许直接 `urllib`／`requests`。
+- **平台流量的唯一出口是 `src/studydash/http.py`**，别处不许直接 `urllib`／`requests`。
   `studydash doctor` 会扫源码，有别的文件私自联网就报出来。
+- 唯一的例外是 `src/studydash/cdp.py`：它用原始 socket 跟**本机**浏览器的调试端口
+  （`127.0.0.1`）说话，用来把你自己登录好的会话读出来。这个例外是**逐文件白名单**的，
+  而且白名单里的文件必须证明自己只连回环地址（`doctor` 会查它有没有 `127.0.0.1`
+  这种主机常量、有没有出现任何网站 URL），不是「说了算」。
 - **GET 可以打任何地址**（读列表页、读进度页）。
 - **POST 只允许打到适配器显式声明的查询端点白名单**。慕课、智慧树这类平台的接口是
   RPC 风格（查询也用 POST 到 `*.rpc`），一刀切禁 POST 等于放弃这些平台；所以改成按
@@ -34,6 +38,9 @@
   `create` / `delete` / `update` / `modify` / `doWork` / `finish` / `report` /
   `sign` / `checkin` / `signin` 这类写动作词，直接拒绝。
 - 代码里**不存在**提交作业、交卷、答题、刷视频、签到、上报学习进度的调用。
+- **不碰密码**。`studydash login` 开一个隔离浏览器窗口让你自己登录（扫码、验证码、
+  二次验证都你自己过），它只从调试端口读登录后的 Cookie。账号密码它一个字符都看不到，
+  也永远不会被写进任何文件。
 
 **不是**：不是刷课工具，不是自动签到/自动答题，不是代做。v1 时期这个仓库是
 超星单平台的看板；v2 重写为多平台聚合器，取的是「自己的进度自己看全」这一半。
@@ -99,17 +106,52 @@ studydash demo --open
 
 ## 接上你自己的账号
 
+### 一条命令：登录，然后直接看到你的学业页面
+
+```bash
+studydash login
+```
+
+它会**新开一个属于自己的浏览器窗口**（用独立的临时配置档，不碰你日常那个浏览器，
+所以你不用关掉正在用的 Edge/Chrome），停在超星登录页。你在里面正常登录——账号密码、
+手机验证码、扫码，都你自己过，程序一个字符都看不到。
+
+登录成功后命令行会自己往下走：**读会话 → 抓课程和作业 → 渲染 → 打开看板**。
+也就是说，登录完你面对的就已经是学业总览页面了。
+
+```text
+▸ 打开浏览器，请在里面完成登录（登录完成后不用管，程序会自己继续）
+  · 配置档：C:\Users\you\AppData\Local\Temp\studydash-login-xxxx
+  · 登录页：https://i.chaoxing.com/base
+✓ 拿到会话（3 条超星 Cookie，已确认有效）
+✓ 保存到 config.json（账号：默认（1234567））
+  ✓ 超星学习通：12 门课
+  共 12 门课 / 1 个平台，平均进度 41.3%
+  待办 6 项（逾期 1 · 三天内 2），已完成 9 项
+```
+
+### 四条取会话的路，挑一条走
+
+| 来源 | 命令 | 什么时候用 |
+| --- | --- | --- |
+| 隔离窗口 | `studydash login` | **首选**。不用关你日常的浏览器，不用手抄 Cookie |
+| 读日常配置档 | `studydash login --source browser` | 你已经在日常浏览器里登录好了。注意：**要先完全退出那个浏览器**（Chromium 对 Cookie 库持有独占锁，不是程序不给力） |
+| 扩展/工具导出 | `studydash login --file cookies.json` | 浏览器换成 Sora/其他不支持的新格式，或上面两种都不行。吃 Netscape `cookies.txt` 和常见扩展导出的 JSON |
+| 手动粘贴 | `studydash login --cookie "_uid=..."` | 兜底。F12 → Network → 任一请求 → Request Headers → 整条 `Cookie` |
+
+四条路都会**立刻验证**会话是否真的有效，不会把死 Cookie 写进配置然后让你自己发现。
+不想让它自动接着抓取，加 `--no-fetch`；只想存不想验证，加 `--no-check`。
+
 ### 超星学习通（status: beta）
+
+`login` 之外，也可以纯命令行把 Cookie 塞进 `config.json`：
 
 ```bash
 studydash init            # 生成 config.json（含注释字段）
-studydash probe chaoxing  # 只读探测，原始响应对应存到 data/raw/，先确认能通
+studydash probe chaoxing  # 只读探测，原始响应存到 data/raw/，先确认能通
 studydash fetch           # 抓课程与进度
 studydash build --open    # 渲染 + 打开
 ```
-
-`config.json` 里的 `cookie` 从浏览器复制：登录后按 F12 → Network → 随便点一个请求 →
-Request Headers → 整条 `Cookie` 复制过来。程序**只存 Cookie，不存账号密码**。
 
 想让看板也显示章节任务点（视频/阅读/测验），把 `options.chapters` 打开：
 
@@ -118,6 +160,17 @@ Request Headers → 整条 `Cookie` 复制过来。程序**只存 Cookie，不�
 ```
 
 这条路径是实验性的，可能被平台改版打断，所以超星标注为 `beta`。
+
+**抓不到课程时不要猜。** `studydash fetch` 会直接告诉你它看到了什么：
+
+```text
+× 超星学习通: 课程列表解析结果为空
+  诊断：响应 34521 字节；正文看起来是登录页（Cookie 没生效）。
+  → 跑 `studydash probe chaoxing` 把原始响应留档下来（data/raw/）
+```
+
+这几句话就能分清三种情况：Cookie 失效、账号确实没课、平台改版了。
+
 
 ### 手动导入（最稳，推荐作为兜底）
 
@@ -175,6 +228,7 @@ unix 时间戳。
 | 命令 | 作用 |
 | --- | --- |
 | *（不带子命令）* | 一键：有 Cookie 就抓、否则用已有数据或演示数据，渲染后打开浏览器 |
+| **`login`** | **登录并把会话存起来**：默认开隔离浏览器窗口；`--source browser/file/cookie` 换来源；默认登录后直接抓取＋渲染＋打开 |
 | `init` | 生成 `config.json`（已有则不覆盖，要重建加 `--force`） |
 | `demo` | 内置样例数据 → payload → 渲染 |
 | `platforms` | 列出所有适配器及其状态 |
@@ -190,6 +244,21 @@ unix 时间戳。
 | `version` | 版本与 payload schema 版本 |
 
 通用参数：`--home DIR` 指定工作区，`-v/--verbose`，`-q/--quiet`，`--version`。
+
+`login` 的完整参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--source live\|browser\|file\|manual` | 会话来源，默认 `live`（隔离窗口） |
+| `--browser edge\|chrome` | 用哪个浏览器，默认 `edge` |
+| `--profile NAME` | 指定配置档（`--source browser` 时用），默认 `Default` |
+| `--file PATH` | `--source file` 时的 cookies.json / cookies.txt |
+| `--cookie TEXT` | `--source manual` 时的整条 Cookie |
+| `--label NAME` | 存进 `config.json` 时的账号名，默认自动（`默认（uid）`） |
+| `--no-check` | 跳过会话验证（不推荐） |
+| `--no-save` | 不写 `config.json` |
+| `--no-fetch` | 存完就停，不接着抓取渲染 |
+| `--open` | 渲染完顺手打开浏览器 |
 
 `probe` 输出的是**存档**（`data/raw/*.json` 里有请求记录与原始响应），用于平台改版时
 定位解析问题，不是用来绕过限制的。
@@ -374,6 +443,10 @@ git push origin main v2.1.0
 
 - **两个适配器未验证**（`icourse163` / `zhihuishu`）。字段是照接口形状写的，可能对不上。
   看板会给它们挂提示，不会假装数据可信。欢迎拿 `probe` 的存档提 issue 修正。
+- **超星的课程列表解析没有真实账号复验过**。逻辑来自 v1 时期能跑通的那版列表页结构，
+  v2 加了登录能力之后还没拿真账号端到端跑过——所以超星标 `beta`，所以解析失败时它会
+  把「响应多少字节、是不是登录页、有没有 `courseList`、里面几个 `<li>`」直接打出来。
+  如果你跑出来是空的，把那四句话贴到 issue，适配器当天就能修。
 - **超星的章节任务点**是实验性的（`options.chapters`）。
 - **列表页通常只给总百分比**，不给分项任务点数，也不给 DDL。这类数据要看板显示，
   得靠手动导入补——把散落各处的 deadline 拢到一处，本身就是这个工具最值钱的部分。
@@ -387,7 +460,21 @@ git push origin main v2.1.0
 `Config.to_dict(redact=True)` 会把 cookie/token/password/secret/authorization
 换掉。分享看板 HTML 前留意它内嵌了你的课程与账号信息。
 
-一切都在本地：程序不向任何第三方服务器发送数据，也不上传你的进度。
+**关于读浏览器 Cookie**（`studydash login` 的 `live` / `browser` 两种来源）：
+
+- 必须你在命令行点名浏览器才会读，**没有后台扫描**。不带 `--source` 时它开的是
+  一个临时隔离配置档，读完即弃。
+- 默认只挑 `*.chaoxing.com` / `*.chaoxing.cn` 的 Cookie，其他站的**不取**。
+- 读的是数据库的**副本**（先复制到临时目录再只读打开），不修改浏览器的任何数据。
+- 解密用的是 Windows 的 DPAPI：密钥由**你的登录凭据**保护，所以这份数据只有在你
+  自己的用户会话里才能解开——换个用户或换台机器就是一堆密文。
+- Cookie 值只出现在内存和 `config.json` 里，**不写日志**（`Cookie.as_dict()` 故意只给
+  长度不给值）。`--verbose` 也不会把值打出来。
+- Chrome 127+ 的 app-bound 加密（`v20`）读不了，会明确报错并给出替代路径，不会
+  悄悄失败。
+
+一切都在本地：程序不向任何第三方服务器发送数据，也不上传你的进度。唯一的外部流量
+是去各平台读你自己的课程页面——和你自己打开浏览器看是同一件事。
 
 ## License
 

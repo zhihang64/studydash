@@ -3,6 +3,72 @@
 本文件格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.0] - 2026-10-19
+
+**「能装上看」变成「能真正用上」**：补上登录与会话获取。v2.0.0 的 `fetch` 要求你自己
+去 F12 手抄 Cookie，这一步劝退了所有人——看板做得再好看，数据进不来就等于不能用。
+
+### 新增
+
+- **`studydash login`**：一条命令完成「登录 → 拿会话 → 抓取 → 渲染 → 打开」。
+  默认新开一个**隔离配置档的浏览器窗口**（不碰你日常那个，所以不用关掉正在用的
+  Edge/Chrome），你在里面正常登录（扫码 / 验证码 / 二次验证都你自己过），程序从调试
+  端口把登录后的会话读出来，**立刻**接着抓课程并打开看板——登录完面对的就已经是学业
+  总览页。
+- **四条会话来源**，按场景挑：
+  - `--source live`（默认）隔离窗口 + CDP，登录后即取，**不用关浏览器**。
+  - `--source browser` 读日常配置档的 Cookie 库。Chromium 对该库持有独占锁，所以这条
+    路要求先退出浏览器——程序会把这件事讲清楚，而不是丢一个 `PermissionError`。
+  - `--source file` 吃扩展导出的 JSON 与 Netscape `cookies.txt`。
+  - `--source manual` 手抄整条 `Cookie`。
+- **`src/studydash/browsers.py`**：跨浏览器 Cookie 读取（Edge / Chrome / Brave /
+  Chromium / Firefox）。Windows 上走完整解密链：`Local State` → DPAPI 解出主密钥 →
+  CNG `BCryptDecrypt` 解 AES-256-GCM。先复制库文件再只读打开，不改动浏览器数据。
+- **`src/studydash/cdp.py`**：零依赖的 CDP 客户端（原始 socket 手写 WebSocket 帧），
+  用来跟本机浏览器的调试端口说话。只连 `127.0.0.1`。
+- **`src/studydash/login.py`**：`normalize_cookie()` 能吃四种输入形态（裸 `a=1; b=2`、
+  带 `Cookie:` 前缀、扩展 JSON、`cookies.txt`），去重、去空白；`check()` 真的拿会话去
+  请求一次登录态接口再判断有效性，不把死 Cookie 写进配置；`save()` 写进 `config.json`
+  并按 `(平台, 账号名)` 去重。
+- **解析失败会自己讲清楚原因**。超星课程列表解析为空时，报错里带上四句诊断：响应多少
+  字节、正文像不像登录页、有没有 `<ul id=courseList>`、里面几个 `<li>`、有没有出现过
+  `courseId`。用户据此能自己分清「Cookie 失效」「账号确实没课」「平台改版」三种情况。
+- **`doctor` 的只读扫描支持「本机例外」**：`cdp.py` 被逐文件白名单放行，但必须证明
+  自己只连回环地址（含 `127.0.0.1` 之类主机常量、且不出现任何网站 URL）才放行。
+
+### 修复
+
+- **Chromium Cookie 的 32 字节域名哈希没被剥掉**（导致新版本浏览器的 Cookie 全是乱码）。
+  Chromium 从 DB `meta.version >= 24` 起，会把 `sha256(host_key)` 前插到明文前面。原先
+  按「读 32 字节」盲切，遇到超星那种域名短到明文不足 32 字节的 Cookie 会被整条吃掉。
+  现在先算 `sha256(host_key)` 和实际前缀比对，比对上了才剥——剥不剥得掉有据可依，不是
+  猜的。
+- **`cdp._http_get` 死等响应结束**：Chromium 不会因为 `Connection: close` 就真关连接，
+  于是每次 `GET /json/version` 都等到超时，「端口起不来」的假象由此而来。现在按
+  `Content-Length`（或 chunked 分块）精确读够长度就返回。
+- **CDP 取 Cookie 用错了域**：浏览器级连接上没有 `Network.getAllCookies`，改用
+  `Storage.getCookies`，并保留一条 `Target.attachToTarget` + 会话级 `getAllCookies` 的
+  回退路径。
+- **WebSocket 二进制帧被当成文本**：CDP 偶尔发二进制帧，原先把它的载荷拼进结果并解码，
+  会让 JSON 解析莫名失败。现在二进制帧连同其后续 continuation 帧整体丢弃。
+- **`login --label` 被覆盖**：显式指定的账号名会被自动生成的 `默认（uid）` 顶掉，导致
+  两个账号同名。现在有显式名就用显式名。
+- **`launch()` 挑端口的范围错了**：原先让系统随便给，拿到的是 49152 以上的临时端口段，
+  浏览器自己也在这段里抢端口，于是反复「端口没起来」。现在固定在 24000–32000 里找，
+  失败重试并每次都换一个。
+- **超星课名解析多了兜底**：`title` 属性 / `course-name` 类 / `<h3>` 都没命中时，退到
+  链接正文。原先这种情况下课名会退化成一串编号，看板上每门课都长得一样。
+- **`_diagnose_list_page` 认不出 JSON 形式的 `courseId`**：原正则只匹配 URL 里的
+  `courseid=111`，含 `"courseId": 111` 的响应会被误报成「页面结构变了」。
+
+### 变更
+
+- 测试套件 196 → **272 个用例**（新增 `test_login.py` 33、`test_cdp.py` 26、
+  `test_chaoxing.py` 13）。
+- README 重写「接上你自己的账号」与「命令」两节，新增 `login` 参数表与隐私说明
+  （读浏览器 Cookie 的边界：默认只取 `*.chaoxing.com`、读副本、不写日志、解密依赖你的
+  Windows 登录凭据）。
+
 ## [2.0.0] - 2026-10-19
 
 **破坏性重构**：从「超星单平台看板」变成「多平台学习进度聚合器」。
@@ -101,5 +167,6 @@
 - 课程列表页通常只给总进度百分比，不给分项任务点数与截止时间；
   截止时间线需要在 `config.json` 的 `deadlines` 里手工登记。
 
+[2.1.0]: https://github.com/zhihang64/studydash/releases/tag/v2.1.0
 [2.0.0]: https://github.com/zhihang64/studydash/releases/tag/v2.0.0
 [1.0.0]: https://github.com/zhihang64/studydash/releases/tag/v1.0.0

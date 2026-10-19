@@ -30,7 +30,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import __version__
+from . import __version__, login
 from .aggregate import aggregate, build_payload, summary_lines
 from .log import Log
 from .model import SCHEMA_VERSION, Account, classify_all, iso, now
@@ -87,6 +87,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cookie", default="", help="顺手写入某个平台的 Cookie")
     p.add_argument("--platform", default="chaoxing", help="配合 --cookie 使用")
     p.set_defaults(func=cmd_init)
+
+    p = subs.add_parser(
+        "login",
+        parents=[common],
+        help="登录一次取得会话并存进配置（默认起独立浏览器，不用关你原来的）",
+    )
+    p.add_argument(
+        "--source",
+        choices=login.SOURCES,
+        default="live",
+        help="live=起独立浏览器你来登录；browser=读日常浏览器配置档；file=读导出文件；manual=直接粘 Cookie",
+    )
+    p.add_argument("--browser", default="edge", help="live/browser 用哪个浏览器（edge/chrome/brave/firefox）")
+    p.add_argument("--profile", default="", help="browser 源：指定配置档名，默认取第一个")
+    p.add_argument("--file", dest="cookie_file", metavar="FILE", help="file 源：导出的 JSON / cookies.txt")
+    p.add_argument("--cookie", default="", help="manual 源：Cookie 请求头")
+    p.add_argument("--platform", default="chaoxing", help="存到哪个平台名下（默认 chaoxing）")
+    p.add_argument("--label", default="", help="账号标签，同平台多账号时用来区分")
+    p.add_argument("--port", type=int, default=0, help="live 源：调试端口，默认自动挑一个空闲的")
+    p.add_argument("--timeout", type=float, default=300.0, help="live 源：最多等多少秒")
+    p.add_argument("--no-check", action="store_true", help="存之前不验证会话是否真能用")
+    p.add_argument("--no-save", action="store_true", help="只取会话，不写进配置")
+    p.add_argument("--no-fetch", action="store_true", help="拿到会话就停，不接着抓取")
+    p.add_argument("--open", action="store_true", help="抓完后直接打开看板")
+    p.set_defaults(func=cmd_login)
 
     p = subs.add_parser("demo", parents=[common], help="用内置样例数据生成看板（不联网）")
     p.add_argument("--open", action="store_true", help="生成后打开浏览器")
@@ -256,6 +281,114 @@ def cmd_init(args: argparse.Namespace) -> int:
     ctx.log.info("  3. `studydash all` 抓取并生成看板")
     ctx.log.info("")
     ctx.log.info("想先看效果可以直接 `studydash demo`，那条路不联网。")
+    return 0
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """取一次会话：取到 → 验一下 → 存进配置。"""
+    ctx = Ctx(args)
+    ctx.workspace.ensure()
+    source = _opt(args, "source", "live") or "live"
+    platform = _opt(args, "platform", "chaoxing") or "chaoxing"
+    label = _opt(args, "label")
+
+    try:
+        if source == "live":
+            ctx.log.step("起一个独立浏览器去登录（不影响你原来开着的浏览器）")
+            cookie = login.from_live(
+                browser=_opt(args, "browser", "edge") or "edge",
+                port=int(_opt(args, "port") or 0) or None,
+                timeout=float(_opt(args, "timeout") or 300.0),
+                log=ctx.log,
+            )
+        elif source == "browser":
+            ctx.log.step("读浏览器配置档里的超星 Cookie")
+            cookie = login.from_browser(
+                _opt(args, "browser", "edge") or "edge",
+                profile=_opt(args, "profile"),
+            )
+        elif source == "file":
+            path = _opt(args, "cookie_file")
+            if not path:
+                ctx.log.error("--source file 需要配 --file <导出的文件>")
+                return 2
+            ctx.log.step(f"从文件读 Cookie：{path}")
+            cookie = login.from_file(path)
+        elif source == "manual":
+            cookie = login.normalize_cookie(_opt(args, "cookie"))
+            if not cookie:
+                ctx.log.error("--source manual 需要配 --cookie 'a=1; b=2'")
+                return 2
+        else:
+            ctx.log.error(f"不认识的来源：{source}")
+            return 2
+    except login.LoginError as exc:
+        ctx.log.error(str(exc))
+        return 1
+
+    if not cookie:
+        ctx.log.error("没取到任何 Cookie。")
+        return 1
+    ctx.log.ok(f"取到 {len([p for p in cookie.split(';') if '=' in p])} 条 Cookie（来源：{source}）")
+
+    if not _flag(args, "no_check"):
+        ctx.log.step("验证这个会话在超星上真能用")
+        session = login.check(cookie, log=ctx.log)
+        if not session.ok:
+            ctx.log.error(f"这个会话不管用：{session.message}")
+            ctx.log.info("→ 多半是没登录完成，或 Cookie 不全。重跑 `studydash login` 再登一次。")
+            return 1
+        ctx.log.ok(f"会话可用（uid={session.uid}）")
+    else:
+        # 没验证也顺手从 Cookie 里抠出 uid：账号名要靠它区分，不然多个账号在配置里
+        # 全叫「默认」，用户根本分不清自己在看谁。
+        session = login.Session(
+            cookie=cookie,
+            source=source,
+            uid=login.uid_from_cookie(cookie),
+            cookie_count=login.cookie_count(cookie),
+            message="未验证",
+        )
+
+    session.source = source
+    session.label = label
+
+    if _flag(args, "no_save"):
+        ctx.log.info("按 --no-save，没有写进配置。")
+        print(cookie)
+        return 0
+
+    path = login.save(ctx.workspace, session, platform=platform, label=label)
+    ctx.log.ok(f"已存入配置：{path}")
+
+    if _flag(args, "no_fetch"):
+        ctx.log.info("")
+        ctx.log.info("按 --no-fetch，没有接着抓取。想抓的时候跑 `studydash all`。")
+        return 0
+
+    # 登录只是一半；用户要的是「登完就看到我的学业页面」，所以这里直接接着抓。
+    ctx.log.info("")
+    ctx.log.step(f"接着抓取「{platform}」的学业数据")
+    only = [platform] if platform != "chaoxing" else ["chaoxing", "manual"]
+    courses, accounts = aggregate(ctx.config, log=ctx.log, only=only)
+    payload = build_payload(courses, accounts, ctx.config, mode="live")
+    ctx.workspace.save_progress(payload)
+
+    if not courses:
+        ctx.log.warn("没抓到任何课程。可能是这个账号确实没在学课程，也可能是平台改版了。")
+        ctx.log.info(f"→ 跑 `studydash probe {platform}` 把原始响应留档下来看看它到底回了什么。")
+        return 1
+
+    out = _render_payload(ctx, payload)
+    ctx.log.ok(f"看板已生成：{out}")
+    _print_summary(ctx, payload)
+    for account in accounts:
+        if not account.ok and account.message:
+            ctx.log.warn(f"{account.platform}: {account.message}")
+    if _flag(args, "open"):
+        webbrowser.open(out.as_uri())
+    else:
+        ctx.log.info(f"想直接看就打开：{out}")
     return 0
 
 

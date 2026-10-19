@@ -50,6 +50,10 @@ EP_KNOWLEDGE_CARDS = (
 # --------------------------------------------------------------------------- #
 
 RE_COURSE_ID = re.compile(r"course[Ii]d=(\d+)")
+#: 同一个字段在两类响应里长得不一样：URL 里是 ``courseid=111``，JSON 里是
+#: ``"courseId": 111``。诊断要说「数据在，只是没匹配上」就必须两种都认，
+#: 否则一份含 courseId 的 JSON 会被误报成「页面结构变了」。
+_RE_COURSE_ID_ANY = re.compile(r"course[Ii]d[\"']?\s*[:=]")
 RE_CLAZZ_ID = re.compile(r"cla[zs]{2}[Ii]d=(\d+)")
 RE_CPI = re.compile(r"cpi=(\d+)")
 RE_PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
@@ -156,8 +160,9 @@ class ChaoxingProvider(Provider):
             raise ProviderError(
                 "课程列表解析结果为空",
                 hint=(
-                    "平台可能改版了。请运行 `studydash probe chaoxing` 并把原始响应"
-                    "贴到 issue，解析逻辑在 providers/chaoxing.py。"
+                    f"{self._diagnose_list_page(raw)}\n"
+                    "    → 跑 `studydash probe chaoxing` 把原始响应留档下来（data/raw/），"
+                    f"解析逻辑在 providers/chaoxing.py。"
                 ),
             )
 
@@ -203,6 +208,31 @@ class ChaoxingProvider(Provider):
     # ------------------------------------------------------------------ #
     # 课程列表解析
     # ------------------------------------------------------------------ #
+
+    def _diagnose_list_page(self, text: str) -> str:
+        """解析为空时，把「这份响应到底长什么样」讲清楚。
+
+        用户唯一能自己判断的事是「这是我的 Cookie 问题，还是平台改版」。只说一句
+        「解析结果为空」等于把问题丢回给用户，所以这里把几个关键事实直接摊开：
+        有多少字节、有没有那个 ``<ul id=courseList>`` 容器、容器里有几个 ``<li>``、
+        正文像不像登录页。四句话就能把下一步该干什么指出来。
+        """
+        facts: list[str] = [f"响应 {len(text)} 字节"]
+        if self.looks_logged_out(text):
+            facts.append("正文看起来是登录页（Cookie 没生效）")
+
+        container = RE_UL_COURSE_LIST.search(text)
+        if container:
+            inner = container.group(1)
+            facts.append(f"找到了 <ul id=courseList>，里面有 {inner.count('<li')} 个 <li>")
+            if inner.count("<li") == 0:
+                facts.append("容器是空的，可能这门账号确实没有课程")
+        else:
+            facts.append("找不到 <ul id=courseList>，页面结构变了或这不是列表页")
+
+        if RE_COURSE_ID.search(text) or _RE_COURSE_ID_ANY.search(text):
+            facts.append("正文里出现过 courseId，说明数据在，是提取逻辑没匹配上")
+        return "诊断：" + "；".join(facts) + "。"
 
     def _parse_course_list(self, text: str) -> list[Course]:
         items = self._parse_json_course_list(text)
@@ -303,10 +333,14 @@ class ChaoxingProvider(Provider):
                 r"<a\b[^>]*title=[\"']([^\"']+)[\"']",
                 r"<span\b[^>]*class=[\"'][^\"']*course[^\"']*name[^\"']*[\"'][^>]*>(.*?)</span>",
                 r"<h3\b[^>]*>(.*?)</h3>",
+                # 最后才退到链接正文。列表页里的课名就在这个 <a> 里，只是有的
+                # 版本没给 title 属性；不这么兜一层，课名就会退化成一串编号，
+                # 看板上每门课都长得一样，等于白抓。
+                r"<a\b[^>]*>(.*?)</a>",
             ):
                 found = re.search(pattern, block, re.S | re.I)
                 if found:
-                    title = found.group(1)
+                    title = RE_TAG.sub("", found.group(1))       # 上面最后一条会带内层标签
                     break
 
             teacher = ""

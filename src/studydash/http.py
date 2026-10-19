@@ -464,24 +464,56 @@ def _decompress(raw: bytes, encoding: str) -> bytes:
     return raw
 
 
+#: 扫描「谁在私自联网」时用的特征词。
+_NETWORK_LIB = re.compile(r"\b(urllib\.request|requests\.(get|post|put|delete|patch)|http\.client)\b")
+
+#: 允许绕开上面的扫描、自己开 socket 的模块——但只准连本机（下面两条正则会核）。
+#: 目前只有 ``cdp.py``：它要跟本机的浏览器调试端口讲 DevTools 协议，用裸 socket
+#: 手写 WebSocket 帧，正因为这样它才不必引入 HTTP 客户端库。
+LOCAL_ONLY_MODULES = frozenset({"cdp.py"})
+
+#: 被放行的模块必须显式把主机定死在回环地址上。
+_LOCAL_HOST = re.compile(r"""HOST\s*=\s*["'](127\.0\.0\.1|localhost|::1)["']""")
+
+#: 被放行的模块里不许出现别的主机名。
+_URL_HOST = re.compile(r"https?://([A-Za-z0-9._\-]+)")
+
+
+def _is_local_only(text: str) -> bool:
+    """被放行的模块是否确实只连本机。"""
+    if not _LOCAL_HOST.search(text):
+        return False
+    return all(host in ("127.0.0.1", "localhost", "::1") for host in _URL_HOST.findall(text))
+
+
 def assert_readonly(paths: Iterable[str] | None = None) -> list[str]:
-    """扫描源码，找出除本模块外还在直接用 urllib/requests 的文件。
+    """扫描源码，找出除本模块外还在私自联网的文件。
+
+    两条规则：
+
+    1. 谁都不许直接用 ``urllib.request`` / ``requests`` / ``http.client``——
+       网络出口只能是本模块。
+    2. 少数模块（见 :data:`LOCAL_ONLY_MODULES`）可以自己开 socket，但主机必须
+       钉死在回环地址上，且文件里不许出现别的主机名。
 
     返回违规文件列表（空表示干净）。CI 里跑这个，防止有人偷偷加回写操作。
     """
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parent
+    myself = pathlib.Path(__file__).resolve()
     offenders: list[str] = []
-    pattern = re.compile(r"\b(urllib\.request|requests\.(get|post|put|delete|patch)|http\.client)\b")
     for path in paths or [str(p) for p in root.rglob("*.py")]:
         p = pathlib.Path(path)
-        if p.resolve() == pathlib.Path(__file__).resolve():
+        if p.resolve() == myself:
             continue
         try:
             text = p.read_text(encoding="utf-8")
         except OSError:
             continue
-        if pattern.search(text):
+        if p.name in LOCAL_ONLY_MODULES:
+            if not _is_local_only(text):
+                offenders.append(str(p))
+        elif _NETWORK_LIB.search(text):
             offenders.append(str(p))
     return offenders
