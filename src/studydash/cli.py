@@ -461,8 +461,11 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 
 def cmd_all(args: argparse.Namespace) -> int:
+    # 用 _flag 而不是 args.demo / args.no_open：这两个开关只定义在 `all` 的 parser 上，
+    # 一旦有人从别处调它（或给某个子命令少写一个默认值），直接属性访问就是
+    # AttributeError。共用 cmd_* 不能假设 args 来自自己的 parser。
     rc = cmd_fetch(args)
-    if rc != 0 and not args.demo:
+    if rc != 0 and not _flag(args, "demo"):
         # 抓取失败不阻断渲染：data/progress.json 里带着警告，看板照出
         ctx = Ctx(args)
         payload = ctx.workspace.load_progress()
@@ -475,7 +478,7 @@ def cmd_all(args: argparse.Namespace) -> int:
         return 1
     path = _render_payload(ctx, payload)
     ctx.log.ok(f"看板已生成：{path}")
-    if not args.no_open:
+    if not _flag(args, "no_open"):
         webbrowser.open(path.as_uri())
     return 0
 

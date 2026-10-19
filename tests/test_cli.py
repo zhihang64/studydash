@@ -386,3 +386,55 @@ def test_verbose_prints_debug_lines(home, capsys):
     run("--home", home, "-v", "demo")
     out = capsys.readouterr().out
     assert "debug" in out.lower() or "工作区" in out
+
+
+# --------------------------------------------------------------------------- #
+# 共用 cmd_* 不能假设 args 来自自己的 parser
+# --------------------------------------------------------------------------- #
+
+def test_cmd_all_survives_foreign_namespace(tmp_path, monkeypatch):
+    """``all`` 的两个开关（demo / no_open）不该被 cmd_all 用属性直取。
+
+    跑 `all` 的时候它们当然在；但 cmd_all 是共用的，只要有人从别处调它，或者某个
+    将来新增的调用方少给了默认值，属性直取就是 AttributeError——用户看到的是
+    「功能调用失败」这种毫无信息量的错。这里故意递一个残缺的 Namespace。
+    """
+    import argparse
+
+    from studydash import cli as cli_mod
+
+    ws = tmp_path / "ws"
+    (ws / "data").mkdir(parents=True)
+    # 先造出一份能渲染的 payload
+    assert run("--home", str(ws), "demo", "--save") == 0
+
+    monkeypatch.setattr(cli_mod.webbrowser, "open", lambda url: None)
+    args = argparse.Namespace(
+        home=str(ws), verbose=False, quiet=True, json=False, demo=True,
+        only="", open=False,
+    )
+    # 没有 demo / no_open 字段，也不该炸
+    rc = cli_mod.cmd_all(args)
+    assert rc == 0
+    assert (ws / "out" / "dashboard.html").exists()
+
+
+def test_cmd_all_renders_even_when_fetch_fails(tmp_path, monkeypatch):
+    """抓取失败不该把已有的看板一起吞掉：进度文件里带着警告，看板照出。"""
+    import argparse
+    from pathlib import Path
+
+    from studydash import cli as cli_mod
+
+    ws = tmp_path / "ws"
+    assert run("--home", str(ws), "demo", "--save") == 0
+    before = (ws / "out" / "dashboard.html").read_bytes()
+
+    def boom(*a, **kw):
+        return 1
+
+    monkeypatch.setattr(cli_mod, "cmd_fetch", boom)
+    monkeypatch.setattr(cli_mod.webbrowser, "open", lambda url: None)
+    args = argparse.Namespace(home=str(ws), verbose=False, quiet=True, json=False)
+    assert cli_mod.cmd_all(args) == 0
+    assert Path(ws / "out" / "dashboard.html").read_bytes() == before
