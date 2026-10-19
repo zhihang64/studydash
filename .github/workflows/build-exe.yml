@@ -1,7 +1,9 @@
 name: build-exe
 
-# 每次推到 main / 提 PR 都跑测试；打 v* 标签额外出包并挂到对应 Release；
-# 手动触发（workflow_dispatch）只出 artifact，不发 Release。
+# 测试便宜，每次都跑（推 main / 提 PR / 打标签）。
+# 打包贵（装 PyInstaller、重建前端、跑冒烟）而且只对「要发出去的那一版」有意义，
+# 所以只在打 v* 标签或手动触发时跑 —— 平时改代码不必为了一个 exe 等几分钟，
+# 也不会因为打包链路的问题把日常提交染红。
 on:
   push:
     branches: [main]
@@ -44,6 +46,8 @@ jobs:
 
   package:
     needs: test
+    # 只有打 v* 标签或手动触发才打包。日常推 main 只跑测试。
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +57,9 @@ jobs:
           python-version: '3.13'
 
       - name: 安装打包依赖
-        run: python -m pip install --disable-pip-version-check pillow pyinstaller
+        # fastapi / uvicorn 必须在这里装：PyInstaller 只收集「能 import 到」的模块，
+        # 没装的话打出来的 exe 里就没有 web 服务，双击只会退回静态看板。
+        run: python -m pip install --disable-pip-version-check pillow pyinstaller fastapi uvicorn httpx
 
       - uses: actions/setup-node@v4
         with:

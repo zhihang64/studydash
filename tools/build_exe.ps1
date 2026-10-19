@@ -50,6 +50,18 @@ if (-not (Test-Path $webIndex)) {
   throw "缺少前端产物 $webIndex —— 先跑 pwsh -File tools\build_web.ps1"
 }
 
+# 依赖预检：PyInstaller 只收集「import 得到」的模块。当前 Python 里没装 fastapi /
+# uvicorn 的话，打出来的 exe 里没有 web 服务（双击只会退回静态看板），
+# 而且这种失败**只在运行时才暴露**。所以宁可在这里直接失败。
+$missing = @()
+foreach ($mod in @('fastapi', 'uvicorn')) {
+  & python -c "import $mod" 2>$null
+  if ($LASTEXITCODE -ne 0) { $missing += $mod }
+}
+if ($missing.Count -gt 0) {
+  throw "当前 Python 里没装 $($missing -join ' / ')：打出来的 exe 会缺网页版。先跑 python -m pip install fastapi uvicorn"
+}
+
 $common = @(
   '--noconfirm', '--clean',
   '--name', 'studydash',
