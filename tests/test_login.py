@@ -145,6 +145,35 @@ def test_check_empty_cookie_needs_no_network(fake_http):
     assert "空" in result.message
 
 
+def test_cookie_gaps_flags_missing_field():
+    assert "_d" in login.cookie_gaps("_uid=12345")
+    assert "_uid" in login.cookie_gaps("_d=abcdef")
+    assert login.cookie_gaps("_uid=12345; _d=abcdef") == ""
+
+
+def test_cookie_gaps_flags_names_without_values():
+    """只复制了 DevTools 表格的 Name 列——整串里一个等号都没有。"""
+    gaps = login.cookie_gaps("_uid; _d; JSESSIONID")
+    assert "一个 name=value 都没有" in gaps
+
+
+def test_check_rejects_valueless_cookie_without_network(fake_http):
+    client = fake_http(_Resp())
+    result = login.check("_uid; _d")
+    assert result.ok is False
+    assert client.asked == [], "这种串不该白跑一次网络请求"
+
+
+def test_check_explains_which_cookie_field_is_missing(fake_http):
+    """失败原因要落到「缺哪一项」，否则用户只会反复重试同一个动作。"""
+    fake_http(_Resp(text='<html><head><title>用户登录</title></head></html>'))
+    result = login.check("_uid=12345")
+    assert result.ok is False
+    assert "登录页" in result.message
+    assert "_d" in result.message
+
+
+
 def test_check_does_not_false_positive_on_settings_password_box(fake_http):
     """回归：我们检查的是「设置」页，那里可能真的有修改密码的密码框。
 

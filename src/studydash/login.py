@@ -40,6 +40,7 @@ LOGIN_CHECK = "https://i.chaoxing.com/base/settings"
 LOGIN_HOME = "https://i.chaoxing.com/base"
 
 RE_UID = re.compile(r"_uid=(\d+)")
+RE_D = re.compile(r"(?:^|;)\s*_d=")
 RE_COOKIE_PAIR = re.compile(r"^\s*([^=\s;]+)\s*=\s*(.*?)\s*$")
 RE_JSESSIONID_IN_URL = re.compile(r"jsessionid=([0-9A-Fa-f]{16,})")
 
@@ -298,10 +299,43 @@ def cookie_count(cookie: str) -> int:
     return len([p for p in (cookie or "").split(";") if "=" in p])
 
 
+def cookie_gaps(cookie: str) -> str:
+    """检查这条 Cookie 串缺了什么关键项；齐全就返回空串。
+
+    超星的登录态至少要有 ``_uid`` 和 ``_d``。用户从 DevTools 复制时最常见的
+    两种残废：只复制了 ``_uid`` 一项，或者只复制了 ``Name`` 那一列（于是整串
+    里一个 ``=`` 都没有）。这两种失败看起来和「会话真过期了」一模一样，不指出
+    来用户只会反复重试同一个动作。
+    """
+    parts = [p.strip() for p in (cookie or "").split(";") if p.strip()]
+    if not parts:
+        return "Cookie 是空的"
+    if "=" not in (cookie or ""):
+        return (
+            f"这 {len(parts)} 段里一个 name=value 都没有——大概率只复制了 DevTools "
+            "表格的 Name 列，请点表格上方那一行整串复制"
+        )
+    missing = []
+    if not RE_UID.search(cookie or ""):
+        missing.append("_uid")
+    if not RE_D.search(cookie or ""):
+        missing.append("_d")
+    if missing:
+        return (
+            f"缺少 {'、'.join(missing)}；超星最少需要 _uid 和 _d 两项，"
+            f"当前只有 {cookie_count(cookie)} 项"
+        )
+    return ""
+
+
 def check(cookie: str, *, timeout: float = 10.0, log=None) -> Session:
     """拿这个 Cookie 去超星问一句「我登录了吗」，确认它真能用。"""
     if not cookie.strip():
         return Session(cookie="", source="", ok=False, message="Cookie 是空的")
+    early_gaps = cookie_gaps(cookie)
+    if "一个 name=value 都没有" in early_gaps:
+        # 这种串不用问服务端就知道没用，省一次请求，也省得用户以为是超星的问题。
+        return Session(cookie=cookie, source="", ok=False, message=early_gaps)
     client = HttpClient(cookie=cookie, timeout=timeout)
     try:
         resp = client.get(LOGIN_CHECK, note="登录态自检")
@@ -318,11 +352,13 @@ def check(cookie: str, *, timeout: float = 10.0, log=None) -> Session:
         return Session(cookie=cookie, source="", ok=False, message=f"被跳去登录页了（{location}），这个会话不管用")
     evidence = login_page_evidence(html)
     if evidence:
+        gaps = cookie_gaps(cookie)
+        tail = f"；另外这条 Cookie {gaps}" if gaps else ""
         return Session(
             cookie=cookie,
             source="",
             ok=False,
-            message=f"服务端返回的是登录页（命中结构特征 {evidence}），这个会话不管用",
+            message=f"服务端返回的是登录页（命中结构特征 {evidence}），这个会话不管用{tail}",
         )
 
     uid = uid_from_cookie(cookie)
