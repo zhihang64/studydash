@@ -145,11 +145,63 @@ def test_check_empty_cookie_needs_no_network(fake_http):
     assert "空" in result.message
 
 
+def test_check_does_not_false_positive_on_settings_password_box(fake_http):
+    """回归：我们检查的是「设置」页，那里可能真的有修改密码的密码框。
+
+    若判据只是 ``type="password"`` + ``id="pwd"``，真实账号登录成功后也会被
+    判成「会话不管用」——把用户报的 bug 换个形式留着。标题不是登录页即可放行。
+    """
+    fake_http(
+        _Resp(
+            text='<html><head><title>账号设置</title></head><body>'
+            '<form id="chpwd"><input type="password" name="oldpwd" id="pwd">'
+            '<input type="password" name="newpwd" id="newpwd"></form>'
+            '<a href="/passport2/logout">退出</a></body></html>'
+        )
+    )
+    result = login.check("_uid=1")
+    assert result.ok is True, f"设置页里的密码框不该被判成登录页：{result.message}"
+
+
 def test_check_detects_login_page(fake_http):
-    fake_http(_Resp(text="<html><title>用户登录</title></html>"))
+    """真正的登录页有密码框和 fid 隐藏域，靠结构认，不靠「用户登录」四个字。"""
+    fake_http(
+        _Resp(
+            text='<html><input type="password" name="pwd" id="pwd">'
+            '<input type="hidden" name="fid" value="-1"></html>'
+        )
+    )
     result = login.check("_uid=1")
     assert result.ok is False
     assert "登录页" in result.message
+    assert 'type="password"' in result.message
+
+
+def test_check_detects_qr_login_page(fake_http):
+    fake_http(_Resp(text='<html><script>fetch("/createqr?uuid=1")</script>'
+                          '<script>setInterval(poll_getauthstatus,3000)</script></html>'))
+    result = login.check("_uid=1")
+    assert result.ok is False
+
+
+def test_check_does_not_false_positive_on_passport_words(fake_http):
+    """回归：登录后的页面头部照样带 passport2 / 「用户登录」，不能被判成过期。
+
+    旧实现拿中文词表在正文前 8000 字里扫，超星只要在头部放一个指向
+    passport2 的资源或退出链接，有效会话就被判死了——这正是「所有登录方式
+    都返回『返回的是登录页』」的成因。
+    """
+    fake_http(
+        _Resp(
+            text="<html><head><title>学习通</title>"
+            '<link href="https://passport2.chaoxing.com/favicon.ico">'
+            '<a href="/logout">用户登录/退出</a></head>'
+            "<body>我的课程</body></html>"
+        )
+    )
+    result = login.check("_uid=123456; _d=abc")
+    assert result.ok is True
+    assert result.uid == "123456"
 
 
 def test_check_detects_redirect_to_passport(fake_http):
@@ -174,10 +226,17 @@ def test_check_accepts_uid_from_html(fake_http):
     assert result.uid == "7654321"
 
 
-def test_check_without_uid_is_not_ok(fake_http):
+def test_check_without_uid_still_usable(fake_http):
+    """页面上找不到 _uid 不等于会话失效——交给真正的抓取去定论。
+
+    回归：原先这里直接判 ``ok=False``，等于拿「没找到证据」当成「找到反证」。
+    uid 由前端脚本另外取、或者干脆没渲染出来的页面很常见，一判死就会变成
+    「登录明明成功，工具说会话不管用」。
+    """
     fake_http(_Resp(text="<html>看不懂的页面</html>"))
     result = login.check("_d=abc")
-    assert result.ok is False
+    assert result.ok is True
+    assert result.uid == ""
     assert "_uid" in result.message
 
 

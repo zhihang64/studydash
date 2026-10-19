@@ -34,9 +34,49 @@ __all__ = [
     "RedirectedError",
     "PROVIDER_STATUSES",
     "STATUS_LABEL",
+    "LOGIN_PAGE_SIGNATURES",
+    "login_page_evidence",
     "REGISTRY",
     "register",
 ]
+
+#: 判定「这是登录页」的结构证据：同一组里的特征**同时**出现才算命中。
+#:
+#: 刻意不用 ``passport`` / ``用户登录`` / ``login`` 这类字符串。实测超星的登录页
+#: 前 8000 字里 ``passport2`` 出现 **13 次**——它是个头部到处都在引用的资源域，
+#: 登录之后的页面同样满屏都是。拿它当判据，等于把每一个响应都判成登录页。
+#:
+#: 具体到超星登录页（``GET https://i.chaoxing.com/base/settings`` 未登录时
+#: 返回 200 + 33286 字节），可靠的结构特征只有三处：``<title>用户登录</title>``
+#: （整页标题，登录之后的任何页面都不会是这样）、``id="pwd"`` 的密码框（偏移
+#: 13517，落在旧实现 8000 字窗口之外）配 ``name="fid"`` 表单域、以及扫码登录的
+#: ``createqr`` / ``getauthstatus`` 接口。``fanyalogin`` 在该页里根本不存在
+#: （表单由脚本驱动），拿它当判据会永远不命中。
+#:
+#: 为什么不单用 ``type="password"`` + ``id="pwd"``：我们检查的正是「设置」页，
+#: 用户信息/修改密码那一块完全可能放一个密码输入框。那样一来真实账号登录成功
+#: 也会被判定成登录页——即把用户本来就在报的这个 bug 换个形式留着。
+LOGIN_PAGE_SIGNATURES: tuple[tuple[str, ...], ...] = (
+    ("<title>用户登录</title>",),           # 整页标题就是登录页
+    ('type="password"', 'name="fid"'),      # 登录表单：密码框 + 学校 id 隐藏域
+    ("createqr", "getauthstatus"),          # 扫码登录的取码 + 轮询接口
+)
+
+
+def login_page_evidence(html: str) -> str:
+    """返回命中的那组结构特征（用 ``+`` 连起来）；不像登录页就返回空串。
+
+    返回证据而不是布尔，是为了让报错能说清「凭什么认为这是登录页」——否则用户
+    拿着「会话不管用」这句话没法判断是该重新登录还是程序判错了。
+    """
+    if not html:
+        return ""
+    low = html.lower()
+    for group in LOGIN_PAGE_SIGNATURES:
+        if all(marker in low for marker in group):
+            return " + ".join(group)
+    return ""
+
 
 PROVIDER_STATUSES = ("stable", "beta", "unverified", "broken")
 
@@ -339,20 +379,8 @@ class Provider(ABC):
 
     @staticmethod
     def looks_logged_out(html: str) -> bool:
-        """粗糙但有效的登录态判断：被踢回登录页时页面里一定有这些特征。"""
-        if not html:
-            return True
-        low = html[:6000].lower()
-        markers = (
-            "passport",
-            "fanyalogin",
-            "用户登录",
-            "请先登录",
-            "login.",
-            "/login",
-            "账号登录",
-        )
-        return any(m in low for m in markers) and "logout" not in low
+        """页面里长出登录表单，就说明被踢回登录页了。"""
+        return bool(login_page_evidence(html))
 
     def account_result(
         self,

@@ -161,6 +161,9 @@ async function submit(): Promise<void> {
   }
 
   const task = await tasks.start(kind, options)
+  // 新的尝试一开始，上一次的红字就该退场 —— 否则用户点「生成二维码」后，
+  // 屏幕上先出现的是上一轮失败的结论，看着像这一轮立刻就失败了。
+  dismissedId.value = null
 
   // 提交完立刻把敏感输入从组件状态里抹掉：密码不该在页面上多停留一秒，
   // Cookie 同理（它等价于账号密码）。
@@ -176,6 +179,20 @@ function reset(): void {
   username.value = ''
   password.value = ''
   cookieText.value = ''
+}
+
+/** 用户点掉的失败提示，按任务 id 记住，换一条新的失败还会再显示。 */
+const dismissedId = ref<string | null>(null)
+
+const showFailure = computed(() => {
+  const task = lastTask.value
+  if (!task || task.state !== 'failed' || specialError.value) return false
+  if (busy.value) return false                 // 新一轮正在跑，旧结论先撤下
+  return dismissedId.value !== task.id
+})
+
+function dismissFailure(): void {
+  dismissedId.value = lastTask.value?.id ?? null
 }
 
 defineExpose({ submit })
@@ -395,8 +412,14 @@ defineExpose({ submit })
       </div>
     </form>
 
-    <p v-if="lastTask && lastTask.state === 'failed' && !specialError" class="form__error">
-      上次登录失败：{{ lastTask.error?.message || lastTask.message }}
+    <p v-if="showFailure" class="form__error">
+      上次登录失败：{{ lastTask?.error?.message || lastTask?.message }}
+      <button
+        type="button"
+        class="form__error-close"
+        aria-label="收起这条提示"
+        @click="dismissFailure"
+      >×</button>
     </p>
 
     <p v-if="tasks.lastFinishedId && succeeded" class="faint form__stamp">
@@ -616,9 +639,27 @@ defineExpose({ submit })
 }
 
 .form__error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
   color: var(--danger);
   font-size: var(--fs-sm);
 }
+
+.form__error-close {
+  flex: none;
+  margin-left: auto;
+  padding: 0 var(--sp-1);
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: var(--fs-md);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.65;
+}
+
+.form__error-close:hover { opacity: 1; }
 
 .form__stamp {
   font-size: var(--fs-xs);

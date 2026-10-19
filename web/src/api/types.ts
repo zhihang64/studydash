@@ -20,6 +20,7 @@ export type ErrorCode =
   | 'captcha_required'
   | 'two_factor_required'
   | 'provider_error'
+  | 'login_timeout'
   | 'busy'
   | 'conflict'
   | 'internal'

@@ -182,6 +182,38 @@ def test_to_api_error_maps_the_interesting_exceptions():
     assert errors.to_api_error(ValueError("天知道")).code == "internal"
 
 
+def test_qr_timeout_is_not_reported_as_a_platform_failure():
+    """「没人扫码」不是超星挂了。
+
+    这条能守住一个具体的退化：``QrTimeoutError`` 是 ``QrLoginError`` 的子类，
+    判定顺序一旦反了，网页版就会显示 502「平台故障」，用户跑去怀疑平台，
+    而不是去看自己的手机。
+    """
+    from studydash.qrlogin import QrLoginError, QrTimeoutError
+
+    timed_out = errors.to_api_error(QrTimeoutError("等了 12 秒也没等到扫码确认"))
+    assert timed_out.code == "login_timeout"
+    assert timed_out.status == 408
+    assert "二维码" in timed_out.hint
+
+    # 其余扫码故障仍然是平台侧的锅
+    assert errors.to_api_error(QrLoginError("拿不到二维码")).code == "provider_error"
+
+
+def test_login_timeout_hint_does_not_tell_the_browser_user_to_run_a_command():
+    """网页版会把 message 原样显示给用户。
+
+    往里面塞 `studydash login` 这种命令行指令，等于在浏览器里教人开终端 ——
+    用户看到的应该只有「重新出码、用 App 扫」。
+    """
+    from studydash.qrlogin import QrTimeoutError
+
+    mapped = errors.to_api_error(QrTimeoutError("等了 12 秒也没等到扫码确认"))
+    for text in (mapped.message, mapped.hint):
+        assert "studydash" not in text
+        assert "`" not in text
+
+
 def test_to_api_error_extracts_the_hint_line():
     # ProviderError 有自己的 hint 字段，不靠从消息里抠
     exc = ProviderError("抓住了", hint="跑 studydash probe chaoxing")
@@ -709,3 +741,81 @@ def test_probe_unknown_platform_is_invalid_request(home):
         operations.op_probe(app_state, rep, {"platform": "nope"})
     assert caught.value.code == "invalid_request"
     assert "chaoxing" in caught.value.detail["available"]
+
+
+def test_qr_login_keeps_session_when_self_check_is_unsure(home, monkeypatch):
+    """服务端都确认扫码成功了，自检再有疑问也不能把会话丢掉。
+
+    自检看的是「登录之后的页面长什么样」这种间接证据，它错过一次（见
+    ``tests/test_login.py`` 里那条 ``passport2`` 的回归）。扫码这条路有服务端的
+    ``status: true`` + 下发会话 Cookie 作硬证据，所以必须是「存下来 + 标警告」，
+    而不是让用户白扫一遍。
+    """
+    from studydash.login import Session
+
+    monkeypatch.setattr(
+        operations,
+        "qr_login",
+        lambda **kw: Session(
+            cookie="_uid=1; fid=1", source="qr", uid="1",
+            ok=False, message="服务端返回的是登录页，这个会话不管用",
+        ),
+    )
+    app_state = state_mod.AppState.create(home=home)
+    mgr = tasks_mod.TaskManager()
+    task = mgr.create("login_qr", {}, None)
+    rep = tasks_mod.Reporter(mgr, task)
+
+    result = operations.op_login_qr(app_state, rep, {})
+
+    assert result["account"]["ok"] is False
+    assert "登录页" in result["account"]["message"]
+    # 关键：Cookie 真的落盘了，用户不用重扫
+    accounts = app_state.config().accounts
+    assert [a.label for a in accounts] == ["默认（1）"]
+    assert accounts[0].cookie == "_uid=1; fid=1"
+
+
+def test_password_login_keeps_session_when_self_check_is_unsure(home, monkeypatch):
+    from studydash.login import Session
+
+    monkeypatch.setattr(
+        operations,
+        "password_login",
+        lambda username, password, **kw: Session(
+            cookie="_uid=2; fid=1", source="password", uid="2",
+            ok=False, message="页面里没看到 _uid",
+        ),
+    )
+    app_state = state_mod.AppState.create(home=home)
+    mgr = tasks_mod.TaskManager()
+    task = mgr.create("login_password", {"username": "u", "password": "p"}, None)
+    rep = tasks_mod.Reporter(mgr, task)
+
+    result = operations.op_login_password(
+        app_state, rep, {"username": "u", "password": "p"},
+    )
+
+    assert result["account"]["ok"] is False
+    assert [a.cookie for a in app_state.config().accounts] == ["_uid=2; fid=1"]
+
+
+def test_cookie_login_still_hard_fails_when_self_check_rejects(home, monkeypatch):
+    """手抄 Cookie 这条路反过来：自检就是唯一的把关，说不行就得拦住。"""
+    from studydash.login import Session
+
+    monkeypatch.setattr(
+        "studydash.login.check",
+        lambda cookie, **kw: Session(
+            cookie=cookie, source="", ok=False, message="服务端返回的是登录页",
+        ),
+    )
+    app_state = state_mod.AppState.create(home=home)
+    mgr = tasks_mod.TaskManager()
+    task = mgr.create("login_cookie", {}, None)
+    rep = tasks_mod.Reporter(mgr, task)
+
+    with pytest.raises(errors.ApiError) as caught:
+        operations.op_login_cookie(app_state, rep, {"cookie": "_uid=9"})
+    assert caught.value.code == "auth_error"
+    assert app_state.config().accounts == []

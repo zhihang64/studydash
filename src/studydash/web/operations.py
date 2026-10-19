@@ -115,10 +115,27 @@ def _after_login(
     *,
     platform: str,
     label: str,
+    strict: bool = True,
 ) -> dict[str, Any]:
-    """登录成功后的共同收尾：写进配置，回读确认，返回账号摘要。"""
-    if not session.ok:
+    """登录成功后的共同收尾：写进配置，回读确认，返回账号摘要。
+
+    ``strict`` 决定「自检说不行」时要不要把整个登录判死。
+    粘贴 Cookie / 读浏览器这两条路，Cookie 是用户自己给的，自检就是唯一的把关，
+    所以必须严格。扫码和密码登录不一样：**服务端已经明确认证过我们**（扫码返回
+    ``status: true`` 并下发会话 Cookie，或 ``/fanyalogin`` 返回成功），自检只是一个
+    间接的旁证。旁证错了就丢掉一个真正可用的会话——这个坑已经踩过一次
+    （自检把带 ``passport2`` 的页面全判成登录页，四条登录路径一起报错）。
+    所以这两条路改成「存下来 + 标警告」，由后续抓取去定论：抓取被踢回登录页时会
+    明确报 ``auth_error``，那时才是有依据的失败。
+    """
+    suspect = not session.ok
+    if suspect and strict:
         raise ApiError("auth_error", session.message or "这个会话不管用")
+    if suspect:
+        rep.log(
+            "warn",
+            f"服务端已确认登录，但自检有疑问（{session.message}）；先保存，抓取时再定论",
+        )
     rep.progress(0.92, "会话可用，写进配置")
     from ..login import save as save_session
 
@@ -136,7 +153,7 @@ def _after_login(
             saved.label or "默认",
             uid=session.uid,
             cookie_count=session.cookie_count,
-            ok=True,
+            ok=not suspect,
             message=session.message,
         )
     }
@@ -167,7 +184,9 @@ def op_login_qr(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> d
 
     rep.progress(0.0, "正在向超星要一张登录二维码")
     session = qr_login(timeout=timeout, log=_task_log(rep), on_code=on_code, on_tick=on_tick)
-    return _after_login(state, rep, session, platform=platform, label=label)
+    return _after_login(
+        state, rep, session, platform=platform, label=label, strict=False,
+    )
 
 
 def op_login_password(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict[str, Any]:
@@ -186,7 +205,9 @@ def op_login_password(state: AppState, rep: Reporter, options: Mapping[str, Any]
     label = _as_text(options.get("label"))
     rep.progress(0.1, "正在读取超星登录页的表单参数")
     session = password_login(username, password, timeout=15.0, log=_task_log(rep))
-    result = _after_login(state, rep, session, platform=platform, label=label)
+    result = _after_login(
+        state, rep, session, platform=platform, label=label, strict=False,
+    )
     result["account"]["message"] = session.message or "密码登录成功"
     return result
 

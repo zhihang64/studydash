@@ -434,7 +434,16 @@ def cmd_login(args: argparse.Namespace) -> int:
         return 1
 
     if verified and session is not None:
-        ctx.log.ok(f"会话可用（uid={session.uid or '未知'}，来源：{source}）")
+        if session.ok:
+            ctx.log.ok(f"会话可用（uid={session.uid or '未知'}，来源：{source}）")
+        else:
+            # 服务端已经认证过（扫码确认 / 密码通过），自检只是旁证。旁证错了不该
+            # 丢掉真能用的会话，所以这里只提醒、不中断，由下面的抓取去定论。
+            ctx.log.warn(
+                f"服务端已确认登录，但自检有疑问：{session.message}"
+                f"（uid={session.uid or '未知'}，来源：{source}）"
+            )
+            ctx.log.info("→ 先存下来，接着抓一次看看；抓取被踢回登录页会明确报错。")
     else:
         ctx.log.ok(f"取到 {len([p for p in cookie.split(';') if '=' in p])} 条 Cookie（来源：{source}）")
 

@@ -39,8 +39,11 @@ MINIMAL_LIST = """
 LOGIN_PAGE = """
 <html><head><title>用户登录</title></head><body>
 <div class="login-box"><h2>用户登录</h2>
-<form action="/passport2/login" method="post">
-<input type="text" name="uname"><input type="password" name="password">
+<form id="login" action="/fanyalogin" method="post">
+<input type="hidden" name="fid" value="-1">
+<input type="hidden" name="refer" value="https://i.chaoxing.com">
+<input type="text" name="uname" id="uname">
+<input type="password" name="password" id="pwd">
 </form></div></body></html>
 """
 

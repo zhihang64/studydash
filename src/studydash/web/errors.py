@@ -24,6 +24,8 @@ ERROR_STATUS: dict[str, int] = {
     "captcha_required": 409,
     "two_factor_required": 409,
     "provider_error": 502,
+    # 408：请求发了、也等够了，只是等的东西（手机扫码）没来。不是平台故障。
+    "login_timeout": 408,
     "busy": 409,
     "conflict": 409,
     "internal": 500,
@@ -83,7 +85,7 @@ def to_api_error(exc: BaseException) -> ApiError:
     from ..login import LoginError
     from ..passlogin import CaptchaRequired, PasswordLoginError, TwoFactorRequired
     from ..providers.base import AuthError, ProviderError
-    from ..qrlogin import QrLoginError
+    from ..qrlogin import QrLoginError, QrTimeoutError
 
     if isinstance(exc, CaptchaRequired):
         return ApiError(
@@ -96,6 +98,14 @@ def to_api_error(exc: BaseException) -> ApiError:
             "two_factor_required",
             "这个账号开了二次验证，密码登录走不通",
             hint="用扫码登录：在手机 App 里确认一下即可。",
+        )
+    # 超时没扫是用户那边没动作，不是超星挂了 —— 必须排在 QrLoginError 之前，
+    # 否则网页版会显示成 502「平台故障」，把注意力引到错误的方向。
+    if isinstance(exc, QrTimeoutError):
+        return ApiError(
+            "login_timeout",
+            str(exc),
+            hint="重新生成一张二维码，用学习通 App 扫（不是微信）；手机要联网。",
         )
     if isinstance(exc, QrLoginError):
         return ApiError("provider_error", str(exc), hint=_hint_of(exc))

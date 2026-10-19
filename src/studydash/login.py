@@ -27,7 +27,7 @@ from typing import Any
 
 from . import browsers, cdp
 from .http import HttpClient, HttpError
-from .providers.base import AccountConfig, ProviderError
+from .providers.base import AccountConfig, ProviderError, login_page_evidence
 from .store import Config
 
 # --------------------------------------------------------------------------- #
@@ -43,16 +43,13 @@ RE_UID = re.compile(r"_uid=(\d+)")
 RE_COOKIE_PAIR = re.compile(r"^\s*([^=\s;]+)\s*=\s*(.*?)\s*$")
 RE_JSESSIONID_IN_URL = re.compile(r"jsessionid=([0-9A-Fa-f]{16,})")
 
-#: 一眼能认出「这不是登录用户」的页面特征。
-LOGGED_OUT_HINTS = (
-    "用户登录",
-    "请先登录",
-    "账号登录",
-    "手机号登录",
-    "/passport2/",
-    "passport2.chaoxing.com",
-    "fanyalogin",
-)
+#: 判「返回的是不是登录页」用结构特征，不用关键词。
+#:
+#: 原先这里是一张中文词表（``用户登录`` / ``passport2`` …），在正文前 8000 字里扫。
+#: 两个致命毛病：① 超星登录后的页面头部同样带 ``passport2``（静态资源域、退出
+#: 链接），于是**有效会话被判死**；② 真正的登录表单在 13000 字之后，压根没进
+#: 扫描窗口，判据实际上只剩几个碰巧命中的中文词。现在统一交给
+#: :func:`studydash.providers.base.login_page_evidence`：看表单结构。
 
 #: 取会话的所有途径。前两个由工具自己在内部走完整个登录流程
 #: （``qr`` 在终端出二维码用手机扫，``password`` 输账号密码）；
@@ -318,10 +315,15 @@ def check(cookie: str, *, timeout: float = 10.0, log=None) -> Session:
     if resp.status in (301, 302, 303, 307, 308) and ("login" in location or "passport" in location):
         return Session(cookie=cookie, source="", ok=False, message="这个会话已经过期或被登出了")
     if "passport2" in location or "fanyalogin" in location:
-        return Session(cookie=cookie, source="", ok=False, message="被跳去登录页了，这个会话不管用")
-    lowered = html[:8000].lower()
-    if any(hint.lower() in lowered for hint in LOGGED_OUT_HINTS):
-        return Session(cookie=cookie, source="", ok=False, message="返回的是登录页，这个会话不管用")
+        return Session(cookie=cookie, source="", ok=False, message=f"被跳去登录页了（{location}），这个会话不管用")
+    evidence = login_page_evidence(html)
+    if evidence:
+        return Session(
+            cookie=cookie,
+            source="",
+            ok=False,
+            message=f"服务端返回的是登录页（命中结构特征 {evidence}），这个会话不管用",
+        )
 
     uid = uid_from_cookie(cookie)
     if not uid:
@@ -331,12 +333,15 @@ def check(cookie: str, *, timeout: float = 10.0, log=None) -> Session:
 
     count = cookie_count(cookie)
     if not uid:
+        # 「没看到 _uid」不是「会话失效」的证据。超星有些页面把 uid 写在脚本里拼、
+        # 或者由前端另外取，正文里搜不到很正常；原先直接判死，等于拿「没找到证据」
+        # 当「找到反证」。这里放行，交给真正的抓取去定论——抓取被踢回登录页时
+        # 会带诊断信息报 auth_error，那时才是有依据的失败。
         return Session(
             cookie=cookie,
             source="",
-            ok=False,
-            message="能打开页面，但没找到 _uid；可能登录没完成，建议用 --source live 重新取一次",
             cookie_count=count,
+            message="能连上，但页面里没看到 _uid；先按可用处理，抓取时若被踢回登录页会明确报错",
         )
     return Session(cookie=cookie, source="", uid=uid, cookie_count=count, message="会话可用")
 

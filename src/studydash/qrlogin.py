@@ -42,6 +42,7 @@ __all__ = [
     "REFER",
     "QrTicket",
     "QrLoginError",
+    "QrTimeoutError",
     "request_code",
     "poll_once",
     "wait_for_scan",
@@ -75,6 +76,15 @@ _RE_VALUE = re.compile(r'value="([^"]*)"')
 
 class QrLoginError(LoginError):
     """扫码这条路上的故障（拿不到码 / 页面结构变了 / 超时没扫）。"""
+
+
+class QrTimeoutError(QrLoginError):
+    """等太久没人扫码。
+
+    单独分一类，因为这不是平台故障：服务端好好的，是手机那边没动静。混进
+    ``QrLoginError`` 里的话，网页版会把它当 502「平台故障」显示，用户会去怀疑
+    超星挂了，而不是去看自己的手机。
+    """
 
 
 @dataclass
@@ -225,11 +235,9 @@ def wait_for_scan(
             break
         time.sleep(interval)
 
-    raise QrLoginError(
+    raise QrTimeoutError(
         f"等了 {timeout:.0f} 秒（问了 {ticks} 次）也没等到扫码确认"
         + (f"，服务端最后说的是「{last_mes}」" if last_mes else "")
-        + "\n  → 再跑一次 `studydash login` 重新出码；"
-        "手机要连着网，且用的是学习通 App（不是微信公众号）"
     )
 
 
@@ -258,15 +266,27 @@ def _finish(client: HttpClient, payload: dict[str, Any], *, log=None) -> Session
 def session_cookie(client: HttpClient) -> str:
     """从 Cookie 罐里取出能代表这次会话的 Cookie 串。
 
-    先按域挑一遍（``i.chaoxing.com`` 上能用的），挑不出来就整罐全要——超星有的
-    时候把会话 Cookie 挂在 ``.chaoxing.com``，有的时候只挂在 ``passport2`` 上，
-    两种都得认。
+    挑的原则不是「域对不对」——同一个罐子在 ``i.chaoxing.com`` /
+    ``mooc1`` / ``passport2`` 上各自拼出的头都合法——而是**带不带 ``_uid``**。
+    ``_uid`` 是登录成功后才下发的，缺了它的 Cookie 串拿去请求超星会被当成游客，
+    随后自检看到的就是登录页，于是「登录成功」被报成「会话不管用」。
+    所以先找带 ``_uid`` 的，再退回内容最多的那个（别拿一个只有 ``JSESSIONID``
+    的残缺头上路），最后才整罐兜底。
     """
-    for url in ("https://i.chaoxing.com/base", "https://mooc1.chaoxing.com/",
-                "https://passport2.chaoxing.com/"):
+    headers = []
+    for url in (
+        "https://i.chaoxing.com/base",
+        "https://mooc1.chaoxing.com/",
+        "https://passport2.chaoxing.com/",
+    ):
         header = client.cookie_header(url)
         if header:
+            headers.append(header)
+    for header in headers:
+        if "_uid=" in header:
             return header
+    if headers:
+        return max(headers, key=lambda h: h.count(";"))
     pairs = client.jar_cookies()
     return "; ".join(f"{name}={value}" for name, value in pairs)
 
