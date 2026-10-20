@@ -21,6 +21,7 @@ const props = defineProps<{ course: CourseView; busy?: boolean }>()
 defineEmits<{ hide: [course: CourseView] }>()
 
 const expanded = ref(false)
+const chaptersOpen = ref(false)
 
 const hasData = computed(() => props.course.has_data !== false)
 
@@ -43,6 +44,12 @@ const pendingAssignments = computed(() =>
 )
 
 const hasParts = computed(() => props.course.progress_parts.length > 0)
+
+// 章节明细只列「还差任务点」的节点（后端已经筛过），所以数量和号数直接加总。
+const chapters = computed(() => props.course.chapters ?? [])
+const chapterPending = computed(() =>
+  chapters.value.reduce((sum, chapter) => sum + (Number(chapter.pending) || 0), 0),
+)
 
 // 「已全部完成」必须看比例，不能看「有没有数据」。
 // 回归：早先写成 `v-else-if="hasData"`，于是任务点 0/77 的课也顶着
@@ -125,6 +132,34 @@ const emptyPartHint = computed(() => {
       />
     </div>
     <p v-else class="course__noparts faint">{{ emptyPartHint }}</p>
+
+    <div v-if="chapters.length" class="course__chapters">
+      <button
+        type="button"
+        class="course__toggle"
+        :aria-expanded="chaptersOpen"
+        @click="chaptersOpen = !chaptersOpen"
+      >
+        <span class="course__caret" aria-hidden="true">{{ chaptersOpen ? '▾' : '▸' }}</span>
+        还差任务点的章节
+        <span class="pill pill--neutral">{{ chapters.length }} 节</span>
+        <span class="faint">共 {{ chapterPending }} 个任务点</span>
+      </button>
+
+      <ul v-if="chaptersOpen" class="course__chapter-list">
+        <li
+          v-for="(chapter, index) in chapters"
+          :key="`${chapter.sbar}-${chapter.name}-${index}`"
+          class="course__chapter"
+          :style="{ paddingLeft: `${0.6 + (Number(chapter.depth) || 0) * 0.9}rem` }"
+        >
+          <span v-if="chapter.sbar" class="course__chapter-sbar">{{ chapter.sbar }}</span>
+          <span class="course__chapter-name">{{ chapter.name }}</span>
+          <span v-if="chapter.unit" class="course__chapter-unit faint">{{ chapter.unit }}</span>
+          <span class="pill pill--warn">还差 {{ chapter.pending }}</span>
+        </li>
+      </ul>
+    </div>
 
     <p class="course__footer">
       <span>最近活跃：{{ formatAgo(course.last_active, new Date(), '暂无记录') }}</span>
@@ -278,6 +313,57 @@ const emptyPartHint = computed(() => {
 .course__noparts {
   padding: var(--s-2) 0;
   font-size: var(--fs-sm);
+}
+
+.course__chapters {
+  margin-top: calc(-1 * var(--s-1));
+}
+
+.course__chapter-list {
+  margin: 0 0 var(--s-1);
+  padding: 0;
+  max-height: 16rem;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.course__chapter {
+  display: flex;
+  gap: var(--s-2);
+  align-items: baseline;
+  padding: 0.35rem 0.6rem;
+  font-size: var(--fs-sm);
+}
+
+.course__chapter + .course__chapter {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.course__chapter-sbar {
+  flex: none;
+  min-width: 3.2rem;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.course__chapter-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course__chapter-unit {
+  flex: none;
+  font-size: var(--fs-xs);
+}
+
+.course__chapter .pill {
+  flex: none;
+  margin-left: auto;
 }
 
 .course__footer {

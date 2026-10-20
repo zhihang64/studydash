@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from html import unescape as _unescape
 from typing import Any
 
+from ..htmlx import parse as _parse_html
 from ..http import HttpError
 from ..log import Log
 from ..model import Assignment, Course, Progress, now, parse_dt
@@ -248,6 +249,72 @@ def _clean_name(text: str) -> str:
     return text.strip(" -|·")[:120]
 
 
+# --------------------------------------------------------------------------- #
+# 章节节点（htmlx.Node -> 纯数据）
+# --------------------------------------------------------------------------- #
+
+def _chapter_name(item: Any) -> str:
+    """节点名：``a.clicktitle`` → ``title`` 属性 → 目录名去掉编号。"""
+    name_node = item.find("div", cls="catalog_name")
+    if name_node is not None:
+        link = name_node.find("a", cls="clicktitle")
+        if link is not None:
+            # 有的节点把 ``<span class="catalog_sbar">13.1</span>`` 放在 ``<a>``
+            # 里面，于是 ``a.all_text`` 是「数据的图表展示 13.1」；先剥编号再判空。
+            text = _strip_sbar(link.all_text, _chapter_sbar(item))
+            if text:
+                return text
+        title = (item.get("title") or "").strip()
+        if title:
+            return _clean_name(title)
+        return _strip_sbar(name_node.all_text, _chapter_sbar(item))
+    return _clean_name(item.get("title") or "")
+
+
+def _strip_sbar(text: str, sbar: str) -> str:
+    """去掉名字尾巴上的目录编号（``统计学的性质与分类 1.1`` → ``统计学的性质与分类``）。"""
+    text = text.strip()
+    if sbar and text.endswith(sbar):
+        text = text[: -len(sbar)]
+    return _clean_name(text)
+
+
+def _chapter_sbar(item: Any) -> str:
+    node = item.find("span", cls="catalog_sbar")
+    return _clean_name(node.all_text) if node is not None else ""
+
+
+def _chapter_knowledge_id(item: Any) -> str:
+    """``id="cur123"`` 或 ``onclick="toOld('cid','123',…)"`` 里的 knowledgeid。"""
+    node_id = str(item.id or "")
+    if node_id.startswith("cur"):
+        return node_id[3:]
+    match = RE_ITEM_TOOLD.search(item.get("onclick") or "")
+    return match.group(1) if match else ""
+
+
+def _chapter_points(item: Any) -> tuple[int, int]:
+    """返回 ``(剩余任务点, knowledgeJobCount)``——两个数都是「还差几个」。
+
+    实测两列逐个相等（1325 个节点），但来源不同：``catalog_points_yi`` 是页面
+    显示值，``input.knowledgeJobCount`` 是脚本用的值。任一缺失时互相兜底。
+    """
+    pending = 0
+    span = item.find("span", cls="catalog_points_yi")
+    if span is not None:
+        text = span.all_text.strip()
+        if text.isdigit():
+            pending = int(text)
+    jobs = pending
+    inp = item.find("input", cls="knowledgeJobCount")
+    if inp is not None:
+        value = (inp.get("value") or "").strip()
+        if value.isdigit():
+            jobs = int(value)
+            pending = pending or jobs
+    return pending, jobs
+
+
 def _kind_of(*values: Any) -> str:
     blob = " ".join(str(v).lower() for v in values if v)
     for needle, kind in _KIND_MAP:
@@ -268,8 +335,8 @@ class ChaoxingProvider(Provider):
         login=True,
         homepage="https://i.chaoxing.com",
         verified="2026-10-19",
-        note="课程列表、任务点进度（已完成任务点 X/Y）与作业/待办列表都已用真实账号"
-        "验证；作业带截止时间与提交状态。章节任务点明细可开（options.chapters）。",
+        note="课程列表、任务点进度（已完成任务点 X/Y）、章节树（每节还差几个任务点）"
+        "与作业/待办列表都已用真实账号验证；逐条任务点清单可开（options.chapters）。",
     )
 
     # ------------------------------------------------------------------ #
@@ -601,6 +668,21 @@ class ChaoxingProvider(Provider):
             course.extra["task_points_total"] = total
             course.extra["task_points_pending"] = info["pending"]
             course.extra["chapter_count"] = len(info["nodes"])
+            chapters = [
+                {
+                    "name": node.get("name", ""),
+                    "unit": node.get("unit", ""),
+                    "sbar": node.get("sbar", ""),
+                    "depth": node.get("depth", 0),
+                    "pending": node["pending"],
+                }
+                for node in info["nodes"]
+                # 只留「还差任务点」的章节：完成的和没挂任务点的章节对用户没用，
+                # 却会把 payload 撑大一倍（一门课动辄上百个节点）。
+                if node.get("pending") and node.get("name", "") and node.get("available", True)
+            ][:300]
+            if chapters:
+                course.extra["chapters"] = chapters
         self.log.debug(f"  进度：{filled}/{min(len(courses), cap)} 门课读到任务点数据")
 
     def _course_page_url(self, course: Course) -> str:
@@ -647,7 +729,19 @@ class ChaoxingProvider(Provider):
             "total": int(head.group(2)) if head else 0,
             "pending": 0,
             "nodes": [],
+            "units": [],
         }
+
+        # 新版课程页有完整的 ``fanyaChapterWhite`` 章节树，能一次拿到「第几章 →
+        # 第几节 → 还差几个任务点」。旧版页面没有这层容器，退回下面的正则扫描。
+        units = self._parse_chapter_tree(html)
+        if units:
+            info["units"] = units
+            for unit in units:
+                for chapter in unit["chapters"]:
+                    info["nodes"].append(chapter)
+                    info["pending"] += chapter["pending"]
+            return info
 
         opens = list(RE_CHAPTER_ITEM_OPEN.finditer(html))
         for index, match in enumerate(opens):
@@ -686,6 +780,84 @@ class ChaoxingProvider(Provider):
                 }
             )
         return info
+
+    def _parse_chapter_tree(self, html: str) -> list[dict[str, Any]]:
+        """把 ``div.fanyaChapterWhite`` 解析成「章 → 节」两层结构。
+
+        真实结构（2026-10 实测，可用 ``studydash probe chaoxing`` 留档对照）::
+
+            <div class="fanyaChapterWhite">
+              <div class="chapter_body">
+                <div class="chapter_td">
+                  <div class="chapter_unit">
+                    <div class="chapter_item">            <!-- 分组标题，没有 onclick -->
+                      <div class="catalog_name"><a class="clicktitle">第1章 统计学的产生与发展</a>
+                    </div>
+                    <div class="catalog_level"><ul>
+                      <li>
+                        <div class="chapter_item" id="cur1236661559"
+                             onclick="toOld('cid','1236661559','clz',0)">
+                          <div class="catalog_title">
+                            <div class="catalog_name">
+                              <a class="clicktitle">统计学的性质与分类</a>
+                              <span class="catalog_sbar">1.1</span>
+                            </div>
+                            <div class="catalog_task">
+                              <input class="knowledgeJobCount" value="1">  <!-- 剩余任务点 -->
+                              <span class="catalog_points_yi">1</span>
+                            </div>
+                          </div>
+                        </div>
+                        <ul><li>…子节点（depth=1）…</li></ul>
+                      </li>
+                    </ul></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+        为什么用 :mod:`studydash.htmlx` 而不是正则：章节是 ``li`` 套 ``li`` 的树，
+        任何 ``<li>.*?</li>`` 写法都会在第一个子节点处截断（和课程列表页踩过的
+        坑一样），拿不到层级也算不准子节点的任务点。
+        """
+        doc = _parse_html(html)
+        white = doc.find("div", cls="fanyaChapterWhite")
+        if white is None:
+            return []
+
+        units: list[dict[str, Any]] = []
+        for unit in white.findall("div", cls="chapter_unit"):
+            head = next(
+                (child for child in unit.children if child.has_class("chapter_item")),
+                None,
+            )
+            unit_name = _chapter_name(head) if head is not None else ""
+            chapters: list[dict[str, Any]] = []
+            for item_li in unit.findall("li"):
+                item = item_li.find("div", cls="chapter_item")
+                if item is None:
+                    continue
+                name = _chapter_name(item)
+                if not name:                 # 空节点（占位/广告位）不占位置
+                    continue
+                kid = _chapter_knowledge_id(item)
+                pending, jobs = _chapter_points(item)
+                chapters.append(
+                    {
+                        "id": kid,
+                        "name": name,
+                        "sbar": _chapter_sbar(item),
+                        "unit": unit_name,
+                        "depth": sum(1 for a in item_li.ancestors() if a.tag == "li"),
+                        "pending": pending,
+                        "jobs": jobs,
+                        # 没有 knowledgeid 的节点点了也打不开（平台上的锁图标）
+                        "available": bool(kid),
+                    }
+                )
+            if unit_name or chapters:
+                units.append({"name": unit_name, "chapters": chapters})
+        return units
 
     # ------------------------------------------------------------------ #
     # 作业 / 待办

@@ -90,12 +90,6 @@ async function fetchNow(): Promise<void> {
   await tasks.start('fetch', {})
 }
 
-async function loadDemo(): Promise<void> {
-  const ok = await dash.loadDemo()
-  if (ok) toast.ok('已生成演示数据', '这是一份样例，不代表任何真实账号。')
-  else toast.error('生成演示数据失败', dash.error)
-}
-
 onMounted(() => {
   void dash.load()
   void accounts.load()
@@ -113,7 +107,7 @@ defineExpose({ fetchNow })
         <h1>总览</h1>
         <p class="muted">
           <template v-if="generatedText">数据刷新于 {{ generatedText }}</template>
-          <template v-else>还没有数据。抓取一次，或者先看看演示数据长什么样。</template>
+          <template v-else>还没有数据。绑定账号后抓取一次。</template>
         </p>
       </div>
 
@@ -129,9 +123,6 @@ defineExpose({ fetchNow })
           @click="fetchNow"
         >
           {{ fetching ? '正在抓取…' : '抓取数据' }}
-        </button>
-        <button type="button" class="btn" :disabled="dash.loadingDemo" @click="loadDemo">
-          {{ dash.loadingDemo ? '生成中…' : '看演示数据' }}
         </button>
       </div>
     </header>
@@ -159,10 +150,9 @@ defineExpose({ fetchNow })
       v-if="!dash.hasData && !dash.loading"
       icon="◎"
       title="还没有采集到任何课程"
-      body="两条路：绑上你的账号让 studydash 去抓，或者先点「看演示数据」了解这个看板能显示什么。"
+      body="先绑定你的学习账号，再点右上角的「抓取数据」。"
     >
       <RouterLink class="btn btn--primary" to="/accounts">绑定账号</RouterLink>
-      <button type="button" class="btn" @click="loadDemo">看演示数据</button>
     </EmptyState>
 
     <template v-else>

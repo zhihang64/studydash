@@ -277,6 +277,93 @@ PAGE_OLD = """
 """
 
 
+#: 新版课程页（2026-10 实测）：``div.fanyaChapterWhite`` 里是「第N章 → 节 → 小节」
+#: 的树，``li`` 套 ``li``。这里刻意做了三层和一个锁住的节点。
+PAGE_TREE = """
+<html><body>
+<div class="fanyaChapterWhite">
+  <div class="chapter_head">
+    <h2 class="xs_head_name">已完成任务点: <span>5</span>/9</h2>
+  </div>
+  <div class="chapter_body">
+    <div class="chapter_td">
+      <div class="chapter_unit">
+        <div class="chapter_item">
+          <div class="catalog_name"><a class="clicktitle"><span>第1章 统计学的产生与发展</span></a></div>
+        </div>
+        <div class="catalog_level"><ul>
+          <li>
+            <div class="chapter_item" id="cur1236661559"
+                 onclick="toOld('266688496','1236661559','153613588',0)"
+                 title="统计学的性质与分类">
+              <div class="catalog_title">
+                <div class="catalog_name">
+                  <a class="clicktitle">统计学的性质与分类</a>
+                  <span class="catalog_sbar">1.1</span>
+                </div>
+                <div class="catalog_task">
+                  <input type="hidden" value="2" class="knowledgeJobCount"/>
+                  <span class="catalog_points_yi">2</span>
+                </div>
+              </div>
+            </div>
+            <ul>
+              <li>
+                <div class="chapter_item" id="cur1236661639"
+                     onclick="toOld('266688496','1236661639','153613588',0)"
+                     title="折线图">
+                  <div class="catalog_title">
+                    <div class="catalog_name">
+                      <a class="clicktitle">折线图<span class="catalog_sbar">1.1.1</span></a>
+                    </div>
+                    <div class="catalog_task">
+                      <input type="hidden" value="3" class="knowledgeJobCount"/>
+                      <span class="catalog_points_yi">3</span>
+                    </div>
+                  </div>
+                </div>
+              </li>
+            </ul>
+          </li>
+          <li>
+            <div class="chapter_item" title="被锁住的章节">
+              <div class="catalog_title">
+                <div class="catalog_name"><a class="clicktitle">被锁住的章节</a></div>
+              </div>
+            </div>
+          </li>
+        </ul></div>
+      </div>
+      <div class="chapter_unit">
+        <div class="chapter_item">
+          <div class="catalog_name"><a class="clicktitle"><span>第2章 数据的收集</span></a></div>
+        </div>
+        <div class="catalog_level"><ul>
+          <li>
+            <div class="chapter_item" id="cur1236661561"
+                 onclick="toOld('266688496','1236661561','153613588',0)"
+                 title="数据的计量与分类">
+              <div class="catalog_title">
+                <div class="catalog_name">
+                  <a class="clicktitle">数据的计量与分类</a>
+                  <span class="catalog_sbar">2.1</span>
+                </div>
+                <div class="catalog_task">
+                  <input type="hidden" value="0" class="knowledgeJobCount"/>
+                  <span class="catalog_points_yi">0</span>
+                </div>
+              </div>
+            </div>
+          </li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>
+"""
+
+
 def test_course_page_reads_header_progress(provider):
     """新版页面：表头 57/1442 就是要显示的那个百分比。"""
     info = provider._parse_course_page(PAGE_NEW)
@@ -305,6 +392,67 @@ def test_node_job_count_is_remainder_not_total(provider):
     info = provider._parse_course_page(PAGE_OLD)
     for node in info["nodes"]:
         assert node["jobs"] == node["pending"]
+
+
+def test_chapter_tree_keeps_units_instead_of_flattening(provider):
+    """``chapter_unit`` 是「第N章」分组，节点要能说清自己属于哪一章。
+
+    回归：旧实现只扫扁平的 ``chapter_item``，分组标题因为「没有 knowledgeid」
+    被整段跳过，用户只能看到「1.1 统计学的性质与分类」，看不到「第1章」。
+    """
+    info = provider._parse_course_page(PAGE_TREE)
+    assert [unit["name"] for unit in info["units"]] == ["第1章 统计学的产生与发展", "第2章 数据的收集"]
+    assert [n["unit"] for n in info["nodes"]] == [
+        "第1章 统计学的产生与发展", "第1章 统计学的产生与发展",
+        "第1章 统计学的产生与发展", "第2章 数据的收集",
+    ]
+    assert [n["sbar"] for n in info["nodes"]] == ["1.1", "1.1.1", "", "2.1"]
+    assert info["pending"] == 5
+
+
+def test_chapter_tree_nested_li_does_not_truncate(provider):
+    """``li`` 套 ``li`` 时深度要算对，且子节点不能把父节点截掉。"""
+    info = provider._parse_course_page(PAGE_TREE)
+    depths = {n["name"]: n["depth"] for n in info["nodes"]}
+    assert depths["统计学的性质与分类"] == 0
+    assert depths["折线图"] == 1
+    # 子节点 3 个任务点 + 父节点 2 个 = 5，说明两层都被读到了
+    assert [n["pending"] for n in info["nodes"]] == [2, 3, 0, 0]
+
+
+def test_chapter_name_drops_sbar_even_inside_the_link(provider):
+    """有的节点把 ``span.catalog_sbar`` 塞进 ``a.clicktitle``，名字不能带编号。"""
+    info = provider._parse_course_page(PAGE_TREE)
+    assert info["nodes"][1]["name"] == "折线图"
+    assert info["nodes"][1]["sbar"] == "1.1.1"
+
+
+def test_locked_chapter_is_marked_unavailable(provider):
+    """没有 knowledgeid 的节点点了也打不开——照样列出来，但标记成不可用。"""
+    info = provider._parse_course_page(PAGE_TREE)
+    locked = [n for n in info["nodes"] if n["name"] == "被锁住的章节"][0]
+    assert locked["available"] is False
+    assert locked["id"] == ""
+
+
+def test_fill_progress_collects_only_chapters_with_remaining_work(provider):
+    """课程卡只带「还差任务点」的章节；0 余量和锁住的节点不上卡片。"""
+    from studydash.model import Course
+
+    course = Course(id="1", name="统计学", platform="chaoxing")
+    provider._course_page_info = lambda _c: provider._parse_course_page(PAGE_TREE)
+    provider._fill_progress([course])
+
+    assert course.extra["chapter_count"] == 4
+    chapters = course.extra["chapters"]
+    assert [c["name"] for c in chapters] == ["统计学的性质与分类", "折线图"]
+    assert chapters[0] == {
+        "name": "统计学的性质与分类",
+        "unit": "第1章 统计学的产生与发展",
+        "sbar": "1.1",
+        "depth": 0,
+        "pending": 2,
+    }
 
 
 def test_fill_progress_keeps_remainder_when_no_percentage(provider):

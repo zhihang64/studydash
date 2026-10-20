@@ -220,6 +220,15 @@
       "next_due": "2026-03-15T23:59:00+08:00",
       "next_due_title": "第 3 章 单元测验",
       "last_active": "2026-03-12T10:22:00+08:00",
+      "chapters": [
+        {
+          "name": "折线图",
+          "unit": "第13章 SPSS操作",
+          "sbar": "13.1.1",
+          "depth": 1,
+          "pending": 3
+        }
+      ],
       "assignments": [
         {
           "uid": "chaoxing:123456:9002",

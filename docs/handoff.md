@@ -3,8 +3,8 @@
 > 写给接手的下一个对话/下一个人。目标：读完这份，不用回溯历史就能继续干活，
 > 并且**不会重踩已经踩过的坑**。
 >
-> 最后更新：v3.0.0 + 超星作业/待办接入 + MOOC 数据接入 + 隐藏课程 + 头歌接入
-> （工作区未提交），2026-10-20。
+> 最后更新：v3.0.0 + 超星作业/待办接入 + 超星章节剩余任务点 + MOOC 数据接入 +
+> 隐藏课程 + 头歌接入（工作区未提交），2026-10-20。
 
 ---
 
@@ -42,7 +42,7 @@ update|modify|doWork|doHomeWork|finish|report|sign|checkin|submitWork` 直接拒
 | 超星：登录（扫码 / 密码 / 粘 Cookie / 读浏览器） | ✅ 真账号可用 | 手工，四个页签都跑过 |
 | 超星：课程列表 | ✅ 22 门课，课名+教师全对 | `data/_raw_list.json` 真实 126612B |
 | 超星：课程进度（任务点 X/Y） | ✅ 22 门课，平均 55.3% | 真账号 9 秒跑完，见 §4.2 |
-| 超星：章节卡片 | 🟡 实验性（`options.chapters` 默认关） | — |
+| 超星：章节树 + 每节剩余任务点 | ✅ 7/22 门课有「还差任务点」的章节 | 默认开，随课程页一起拿到，见 §4.2 |
 | 超星：**作业 / 待办列表** | ✅ 21 条跨 9 门课，4 项未提交 | 真账号 2026-10-19，见 §4.2.1 |
 | 中国大学 MOOC：登录 | ✅ 扫码协议实测 2026-10-19 | 取码/轮询/自检对真站跑通；扫码确认需手机 |
 | 中国大学 MOOC：课程/作业数据 | ✅ 12 门课 / 147 条作业，**beta** | 真账号 2026-10-20，见 §4.2.3 |
@@ -52,7 +52,7 @@ update|modify|doWork|doHomeWork|finish|report|sign|checkin|submitWork` 直接拒
 | 手动导入 / 内置样例 | ✅ stable | `manual` / `demo` 适配器 |
 | 隐藏课程（二级页「已隐藏课程」） | ✅ | 真数据工作区实测 34→33 门，见 §4.8 |
 | 网页版六个页面（含二级页） | ✅ | headless Edge 截图逐页看过 |
-| 命令行全部子命令 | ✅ | 555 例测试 |
+| 命令行全部子命令 | ✅ | 562 例测试 |
 
 **端到端真实验证过的平台是超星、中国大学 MOOC 和头歌**（后两个标 `beta`，不是
 `stable`：MOOC 的两个 RPC、头歌的三个接口都只用过一个真账号验过）。智慧树的
@@ -104,7 +104,7 @@ src/studydash/
     └── static/            ★ 前端构建产物，必须进仓库
 
 web/                       前端源码（含二级页 HiddenView）
-tests/                     555 例
+tests/                     562 例
 tools/                     build_exe.ps1 / build_web.ps1 / make_icon.py / entry.py
 docs/web-api.md            网页版 API 契约（冻结）
 docs/plugin.md             写自己的适配器
@@ -114,18 +114,19 @@ docs/plugin.md             写自己的适配器
 
 | 什么 | 位置 |
 | --- | --- |
-| 课程列表接口 | `providers/chaoxing.py:38` `EP_COURSE_LIST` |
-| 课程页接口 | `providers/chaoxing.py:42` `EP_COURSE_PAGE` |
-| 课程列表解析（嵌套 ul/li 坑） | `:448` `_parse_html_course_list` |
-| 进度总入口 | `:582` `_fill_progress` |
-| 拉单门课页面 | `:613` `_course_page_info` |
-| **解析任务点 / 章节节点** | `:630` `_parse_course_page`（docstring 里有真实 HTML 结构） |
-| 章节卡片 | `:907` `_chapters_of` |
-| 进度表头正则 | `:130` `RE_HEAD_TASK` |
-| **作业列表端点** | `:54` `EP_WORK_LIST`（手机版 `work/stu-work`） |
-| **作业挂载入口** | `:693` `_fill_works` |
-| **解析作业列表** | `:781` `_parse_work_list`（docstring 里有真实 HTML 结构） |
-| **解析作业详情（截止时间/分数）** | `:848` `_parse_work_detail` |
+| 课程列表接口 | `providers/chaoxing.py:39` `EP_COURSE_LIST` |
+| 课程页接口 | `providers/chaoxing.py:43` `EP_COURSE_PAGE` |
+| 课程列表解析（嵌套 ul/li 坑） | `:445` `_parse_course_list` |
+| 进度总入口 | `:650` `_fill_progress` |
+| 拉单门课页面 | `:696` `_course_page_info` |
+| **解析任务点 / 章节节点（入口）** | `:713` `_parse_course_page`（docstring 里有真实 HTML 结构） |
+| **解析章节树（章 → 节 → 小节）** | `:784` `_parse_chapter_tree`（htmlx，不是正则） |
+| 章节任务点明细（实验性） | `:1083` `_chapters_of` |
+| 进度表头正则 | `:131` `RE_HEAD_TASK` |
+| **作业列表端点** | `:55` `EP_WORK_LIST`（手机版 `work/stu-work`） |
+| **作业挂载入口** | `:866` `_fill_works` |
+| **解析作业列表** | `:960` `_parse_work_list`（docstring 里有真实 HTML 结构） |
+| **解析作业详情（截止时间/分数）** | `:1024` `_parse_work_detail` |
 
 ---
 
@@ -165,6 +166,22 @@ docs/plugin.md             写自己的适配器
   形势与政策 `pending=14`、大学英语III 精读+听说 `pending=31`（变体 B）。
 - `knowledgeid` 这个参数在 2026-10 的课程页里**出现 0 次**。旧实现靠扫它拿章节，
   所以章节数一直恒为 0（已修，`_chapters_of` 改为复用 `_parse_course_page` 的 nodes）。
+- **章节树也在这份 HTML 里**（零额外请求）：
+  `div.fanyaChapterWhite > .chapter_body > .chapter_td > .chapter_unit`。
+  每个 `chapter_unit` 是一章，章名在它的**直接子节点** `.chapter_item > .catalog_name`；
+  章下面是 `.catalog_level > ul > li > .chapter_item#cur<knowledgeid>`，`li` 还会再套
+  `ul > li`（实测 `大数据统计分析基础` 最深 depth=2：13.1 → 13.1.1 → 13.1.1.1）。
+  ⚠️ **不能用正则切 `<li>…</li>`**：内层 `li` 会把外层截断（和课程列表同一个坑），
+  所以这块用 `htmlx.Node` 树遍历，`depth` = 祖先 `li` 个数。
+- 每个节点的 `.catalog_task` 里有两列同样的「还差几个」：`input.knowledgeJobCount@value`
+  和 `span.catalog_points_yi` 文本，互为兜底。节名优先取 `a.clicktitle`；
+  **有的节点把 `span.catalog_sbar` 塞在 `<a>` 里**，取完必须剥掉编号，否则名字会变成
+  「折线图 1.1.1」（见 `_strip_sbar`）。
+- 没有 `knowledgeid`/`onclick` 的节点是平台上锁住的节，`available=False`。分组标题
+  本身也没有 onclick，靠「是不是 `chapter_unit` 的直接子节点」区分，别按有无 id 一刀切。
+- 展示层只透传 `pending > 0` 的节点（`Course.extra["chapters"]`）：22 门课实测 7 门有数据、
+  合计约 84 KB；已完成和没挂任务点的章节不上 payload。`大数据统计分析基础` 的表头是
+  0/77、节点 pending 合计也是 77，能对上。
 
 ### 4.2.1 超星作业 / 待办：手机版 `work/stu-work` 是唯一入口
 
@@ -418,7 +435,7 @@ $env:PYTHONUTF8='1'
 $env:PYTHONPATH="$PWD\src"      # 系统 python 没装 studydash，必须给
 $env:STUDYDASH_NO_GUI='1'       # 否则崩溃上报会弹 MessageBox 卡住测试
 
-python -m pytest -q             # 555 passed，约 6 秒
+python -m pytest -q             # 562 passed，约 6 秒
 ```
 
 前端改动后**必须重建**，否则页面还是旧产物：
@@ -465,7 +482,7 @@ $out = 'D:\DSH chat\studydash\data\shot.png'
 
 ## 6. 测试
 
-- 555 例，`tests/`。覆盖面：aes / aggregate / cdp / chaoxing / cli / educoder /
+- 562 例，`tests/`。覆盖面：aes / aggregate / cdp / chaoxing / cli / educoder /
   htmlx / http / icourse163 / login / mooclogin / model / providers / qr / render /
   store / web。
 - `tests/fixture_course_list.html` 是真实课程列表页的缩减版。

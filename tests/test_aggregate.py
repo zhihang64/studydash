@@ -336,6 +336,26 @@ def test_pending_points_zero_is_not_reported(config):
     assert "pending_points" not in payload["courses"][0]
 
 
+def test_chapters_pass_through_to_the_course_card(config):
+    """章节明细由适配器放在 ``extra`` 里，聚合层只负责透传，不改形状。"""
+    chapters = [
+        {"name": "折线图", "unit": "第13章 SPSS操作", "sbar": "13.1.1", "depth": 1, "pending": 3},
+    ]
+    courses = [
+        make_course("c1", platform="chaoxing", progress=[Progress("任务点", 1, 4)]),
+    ]
+    courses[0].extra["chapters"] = chapters
+    payload = build_payload(courses, [], config)
+    assert payload["courses"][0]["chapters"] == chapters
+
+
+def test_empty_chapters_are_not_emitted(config):
+    """没有章节数据时别塞一个空数组——前端会以为「有这块但没内容」。"""
+    courses = [make_course("c1", platform="chaoxing")]
+    payload = build_payload(courses, [], config)
+    assert "chapters" not in payload["courses"][0]
+
+
 # --------------------------------------------------------------------------- #
 # 隐藏课程
 # --------------------------------------------------------------------------- #

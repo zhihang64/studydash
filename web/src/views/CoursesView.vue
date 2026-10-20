@@ -49,7 +49,7 @@ const emptyTitle = computed(() => {
 const emptyBody = computed(() => {
   if (inDetail.value) return '它可能已经被移除，或者这次抓取没取到。'
   if (filtering.value) return '换个关键词，或者清掉筛选条件。'
-  return '先绑定账号并抓取一次，或者看看演示数据。'
+  return '先绑定账号并抓取一次。'
 })
 
 function closeDetail(): void {

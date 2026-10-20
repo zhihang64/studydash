@@ -295,6 +295,11 @@ def _course_card(course: Course, ref: datetime) -> dict[str, Any]:
     pending = course.extra.get("task_points_pending")
     if isinstance(pending, int) and pending > 0 and not course.progress:
         data["pending_points"] = pending
+    # 章节明细（只含「还差任务点」的节点，由 chaoxing 适配器按课程页解析）。
+    # 空列表不出现，前端据此决定折不折叠那一块。
+    chapters = course.extra.get("chapters")
+    if chapters:
+        data["chapters"] = chapters
     # 每门课单独算一次「当前最扎眼的状态」，前端不用自己推导
     states = [a.state for a in course.assignments]
     if "overdue" in states:

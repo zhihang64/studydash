@@ -253,13 +253,18 @@ studydash build --open    # 渲染 + 打开
 "options": { "works": false, "max_work_details": 60 }
 ```
 
-想让看板也显示章节任务点（视频/阅读/测验），把 `options.chapters` 打开：
+**章节明细也默认开启**（不需要配置）：课程页本身带着整棵章节树，逐节写着「还差几个
+任务点」。这份数据和进度一起拿到，不多发一次请求，看板在课程卡里折叠显示
+「还差任务点的章节」（第几章、第几节、各差多少）。
+
+`options.chapters` 是另一条路——逐条展开每节的视频/阅读/测验清单，走
+`knowledge/cards`，每节一次请求，**这条仍是实验性的**：
 
 ```json
 "options": { "chapters": true, "max_chapters": 40 }
 ```
 
-章节任务点这条路径是实验性的，可能被平台改版打断。
+校验不过或平台改版时，先跑 `studydash probe chaoxing` 留档原始响应。
 
 **抓不到课程时不要猜。** `studydash fetch` 会直接告诉你它看到了什么：
 
@@ -372,7 +377,7 @@ unix 时间戳。
 
 | id | 平台 | 状态 | 鉴权 | 说明 |
 | --- | --- | --- | --- | --- |
-| `chaoxing` | 超星学习通 | stable | Cookie | 课程、进度、作业/待办已验证；章节任务点为实验性 |
+| `chaoxing` | 超星学习通 | stable | Cookie | 课程、进度、章节剩余任务点、作业/待办已验证（2026-10-20）；逐条任务点清单为实验性 |
 | `icourse163` | 中国大学 MOOC | **beta** | 扫码 / Cookie | 课程、进度、作业/测验/考试已验证（2026-10-20）；成绩单与证书未接入 |
 | `educoder` | 头歌 | **beta** | Cookie | 课程、实训 + 图文作业、截止时间与完成状态已验证（2026-10-20）；登录走「独立窗口」或「读浏览器」，没有扫码/账号密码 |
 | `zhihuishu` | 智慧树 | **未验证** | Cookie | 同上 |
@@ -444,7 +449,8 @@ unix 时间戳。
   点平台卡或筛选 chips 可以只看某个平台。
 - **DDL 时间轴**：全部待办按 已逾期 / 3 天内 / 7 天内 / 以后 / 无截止 / 已完成 分组。
 - **课程卡**：总百分比、分项进度条（任务点 / 作业 / 出勤…随数据源变化）、
-  最近活跃、下一项截止、已完成项数，可展开作业明细（含分数与剩余天数）。
+  最近活跃、下一项截止、已完成项数，可展开作业明细（含分数与剩余天数）；
+  超星课程还能展开「还差任务点的章节」，逐节显示还差几个。
 - 搜索（课程 / 教师 / 标题）、排序、深浅色主题、键盘可操作、响应式。
 - **静态单文件**：模板里已内嵌数据，`file://` 直接打开就能用，零 CDN、零外部请求。
   主题可用链接强制：`out/dashboard.html#dark`、`#light`。
@@ -468,6 +474,10 @@ accounts  [{ platform, label, ok, message, fetched_at }]
 `data/progress.json` 就是这个 payload，所以 `build` 单独跑得起来、可以手工编辑、
 也可以拿它当别的工具的数据源。枚举：`kind` ∈ video/read/quiz/homework/exam/
 discussion/live/other；`state` ∈ overdue/urgent/soon/later/none/done。
+
+`courses[]` 里的超星课程还可能带一个可选的 `chapters[]`：每项是
+`{ name, unit, sbar, depth, pending }`，只包含「还差任务点」的节（`pending` 是还剩
+几个，不是总数）。没有章节数据时这个字段不出现。
 
 `render` 注入 payload 时会转义 `<`、`&`、U+2028/U+2029，课程名里带 HTML 也注入不出去；
 前端全部走 DOM API + `textContent`，不用 `innerHTML` 拼字符串。
@@ -546,7 +556,7 @@ studydash/
 │   ├── templates/dashboard.html   静态看板模板（单文件自包含）
 │   └── providers/       适配器：chaoxing / icourse163 / educoder / zhihuishu / manual / demo
 ├── web/                 Vue 3 + TypeScript 前端源码（Vite）
-├── tests/               555 个用例（pytest）
+├── tests/               562 个用例（pytest）
 ├── docs/                payload 契约、web API 契约、插件文档、预览图
 ├── tools/               图标生成、PyInstaller 入口、前端/打包脚本、版本资源模板
 ├── assets/              icon.png / icon.ico（由 tools/make_icon.py 生成）
@@ -640,9 +650,11 @@ git push origin main v3.1.0
   看板会给它挂提示，不会假装数据可信。欢迎拿 `probe` 的存档提 issue 修正。
 - **中国大学 MOOC 是 beta**：课程、进度、作业/测验/考试都已用真实账号验证，
   但成绩单、证书等外围数据还没接。接口改版时用 `studydash probe icourse163` 留档。
-- **超星的章节任务点**是实验性的（`options.chapters`）。课程、进度与作业列表都已用
-  真实账号验证（2026-10-19）；解析失败时它会把「响应多少字节、是不是登录页、有没有
-  `courseList`、里面几个 `<li>`」直接打出来，便于定位是 Cookie 还是改版。
+- **超星的章节剩余任务点**默认跟着课程页一起抓（第几章 → 第几节 → 还差几个），
+  22 门课里 7 门有数据；逐条任务点清单（`options.chapters`）仍是实验性的。
+  课程、进度与作业列表都已用真实账号验证（2026-10-19）；解析失败时它会把「响应多少
+  字节、是不是登录页、有没有 `courseList`、里面几个 `<li>`」直接打出来，便于定位是
+  Cookie 还是改版。
 - **部分平台/课程只给总百分比**，不给分项任务点数，也不给 DDL。超星作业的 DDL 已经
   能读出来；其它来源拿不到的，仍可以靠手动导入补——把散落各处的 deadline 拢到一处，
   本身就是这个工具最值钱的部分。

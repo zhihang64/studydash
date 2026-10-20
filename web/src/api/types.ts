@@ -202,6 +202,20 @@ export interface ProgressPart {
   ratio: number | null
 }
 
+/**
+ * 一个「还差任务点」的章节（超星课程页的 `fanyaChapterWhite` 树）。
+ *
+ * `pending` 是**还剩几个**任务点，不是总数——平台只给这一列，别拿它算百分比。
+ * `depth` 是层级（0 = 节，1 = 小节…），用来缩进；`unit` 是它所属的「第N章」。
+ */
+export interface ChapterProgress {
+  name: string
+  unit: string
+  sbar: string
+  depth: number
+  pending: number
+}
+
 export interface CourseView {
   platform: string
   platform_name: string
@@ -247,6 +261,8 @@ export interface CourseView {
    * 有它的时候 ratio 仍是 null，但它比一句「无数据」有用得多。
    */
   pending_points?: number
+  /** 还差任务点的章节明细；只在这门课确实有章节数据时出现。 */
+  chapters?: ChapterProgress[]
   /**
    * 「隐藏课程」用的稳定标识：`平台:课程id:学期id`。
    *
