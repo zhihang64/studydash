@@ -54,6 +54,8 @@ __all__ = [
     "read_cookies",
     "cookie_header",
     "chaoxing_cookie",
+    "icourse163_cookie",
+    "educoder_cookie",
 ]
 
 # Windows FILETIME 的起点（1601-01-01 UTC），Chromium 的过期时间以它为准
@@ -610,4 +612,47 @@ def chaoxing_cookie(
     header = cookie_header(got, domain="i.chaoxing.com")
     if not header:
         raise BrowserError("找到了超星的 Cookie，但都不适用于 i.chaoxing.com")
+    return header, got
+
+
+#: 读中国大学 MOOC 会话时需要的域（网易 URS 的会话可能落在 163.com 下）
+ICOURSE163_DOMAINS = (
+    "icourse163.org",
+    "163.com",
+)
+
+
+def icourse163_cookie(
+    browser: str, *, profile: str = "", domains: tuple[str, ...] = ICOURSE163_DOMAINS
+) -> tuple[str, list[Cookie]]:
+    """取中国大学 MOOC 会话 Cookie。返回 ``(请求头字符串, 命中的 Cookie 列表)``。"""
+    got = read_cookies(browser, profile=profile, domains=domains)
+    if not got:
+        raise BrowserError(
+            f"{BROWSERS[_normalize(browser)]['name']} 里没有中国大学 MOOC 的 Cookie。\n"
+            "      先在浏览器里打开 icourse163.org 并登录，然后重跑这条命令。"
+        )
+    header = cookie_header(got, domain="www.icourse163.org")
+    if not header:
+        raise BrowserError("找到了中国大学 MOOC 的 Cookie，但都不适用于 www.icourse163.org")
+    return header, got
+
+
+#: 读头歌会话时需要的域
+EDUCODER_DOMAINS = ("educoder.net",)
+
+
+def educoder_cookie(
+    browser: str, *, profile: str = "", domains: tuple[str, ...] = EDUCODER_DOMAINS
+) -> tuple[str, list[Cookie]]:
+    """取头歌会话 Cookie。返回 ``(请求头字符串, 命中的 Cookie 列表)``。"""
+    got = read_cookies(browser, profile=profile, domains=domains)
+    if not got:
+        raise BrowserError(
+            f"{BROWSERS[_normalize(browser)]['name']} 里没有头歌的 Cookie。\n"
+            "      先在浏览器里打开 educoder.net 并登录，然后重跑这条命令。"
+        )
+    header = cookie_header(got, domain="www.educoder.net")
+    if not header:
+        raise BrowserError("找到了头歌的 Cookie，但都不适用于 www.educoder.net")
     return header, got

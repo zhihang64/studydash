@@ -597,7 +597,7 @@ def test_demo_payload_then_readable(client, auth):
     assert payload["meta"]["mode"] == "demo"
     assert payload["overview"]["courses"] >= 1
     meta = client.get("/api/payload/meta", headers=auth).json()
-    assert set(meta) == {"generated_at", "mode", "warnings", "overview"}
+    assert set(meta) == {"generated_at", "mode", "warnings", "overview", "hidden_count"}
 
 
 def test_unknown_task_kind_is_rejected_with_a_list(client, auth):
@@ -819,3 +819,157 @@ def test_cookie_login_still_hard_fails_when_self_check_rejects(home, monkeypatch
         operations.op_login_cookie(app_state, rep, {"cookie": "_uid=9"})
     assert caught.value.code == "auth_error"
     assert app_state.config().accounts == []
+
+
+def test_educoder_rejects_qr_and_password_login(home):
+    """头歌没有扫码协议、账号密码要过验证码——直说，别拿超星的协议去撞。"""
+    app_state = state_mod.AppState.create(home=home)
+    mgr = tasks_mod.TaskManager()
+
+    for kind in ("login_qr", "login_password"):
+        options = {"platform": "educoder"}
+        if kind == "login_password":
+            options.update({"username": "u", "password": "p"})
+        task = mgr.create(kind, dict(options), None)
+        rep = tasks_mod.Reporter(mgr, task)
+
+        with pytest.raises(errors.ApiError) as caught:
+            operations.resolve(kind)(app_state, rep, options)
+
+        assert caught.value.code == "invalid_request"
+        assert "浏览器" in (caught.value.hint or "")
+    assert app_state.config().accounts == []
+
+
+def test_educoder_cookie_login_uses_its_own_self_check(home, monkeypatch):
+    """分派必须落到 educoder_login.check，不能用超星的课程列表页判登录。"""
+    from studydash import educoder_login
+    from studydash.login import Session
+
+    seen: dict[str, str] = {}
+
+    def fake_check(cookie, **_kw):
+        seen["cookie"] = cookie
+        seen["platform"] = "educoder"
+        return Session(
+            cookie=cookie, source="", uid="pxknporu8", cookie_count=2,
+            message="会话可用（头歌，小周）",
+        )
+
+    monkeypatch.setattr(educoder_login, "check", fake_check)
+    app_state = state_mod.AppState.create(home=home)
+    mgr = tasks_mod.TaskManager()
+    task = mgr.create("login_cookie", {"platform": "educoder"}, None)
+    rep = tasks_mod.Reporter(mgr, task)
+
+    result = operations.op_login_cookie(
+        app_state,
+        rep,
+        {"cookie": "_educoder_session=abc; uid=1", "platform": "educoder"},
+    )
+
+    assert seen["cookie"] == "_educoder_session=abc; uid=1"
+    assert result["account"]["uid"] == "pxknporu8"
+    accounts = app_state.config().accounts
+    assert [(a.platform, a.label) for a in accounts] == [("educoder", "默认（pxknporu8）")]
+
+
+# --------------------------------------------------------------------------- #
+# 隐藏课程
+# --------------------------------------------------------------------------- #
+
+def _demo_payload(client, auth) -> dict:
+    assert client.post("/api/payload/demo", headers=auth).status_code == 200
+    return client.get("/api/payload", headers=auth).json()
+
+
+def test_hidden_course_disappears_from_payload_and_is_saved(client, auth, home):
+    payload = _demo_payload(client, auth)
+    course = payload["courses"][0]
+    key = course["key"]
+
+    reply = client.post("/api/hidden", headers=auth, json={"key": key})
+    assert reply.status_code == 200
+    assert reply.json()["count"] == 1
+    assert reply.json()["hidden"][0]["key"] == key
+
+    filtered = client.get("/api/payload", headers=auth).json()
+    assert key not in {c["key"] for c in filtered["courses"]}
+    assert filtered["meta"]["hidden_count"] == 1
+    # 这门课的时间线也要一起消失
+    assert all(a["course_id"] != course["id"] for a in filtered["timeline"]
+               if a["platform"] == course["platform"])
+
+    # 偏好要落盘，重启服务后仍然生效
+    saved = json.loads((home / "config.json").read_text(encoding="utf-8"))
+    assert saved["ui"]["hidden_courses"] == [key]
+
+
+def test_hidden_course_does_not_change_the_stored_progress_file(client, auth):
+    """隐藏只是视图过滤：progress.json 保持完整，取消隐藏不用重新抓。"""
+    payload = _demo_payload(client, auth)
+    key = payload["courses"][0]["key"]
+    before = client.app.state.studydash.workspace.load_progress()
+
+    client.post("/api/hidden", headers=auth, json={"key": key})
+
+    after = client.app.state.studydash.workspace.load_progress()
+    assert len(after["courses"]) == len(before["courses"])
+
+
+def test_unhide_restores_the_course(client, auth):
+    payload = _demo_payload(client, auth)
+    key = payload["courses"][0]["key"]
+
+    client.post("/api/hidden", headers=auth, json={"key": key})
+    reply = client.delete(f"/api/hidden/{key}", headers=auth)
+
+    assert reply.status_code == 200
+    assert reply.json()["count"] == 0
+    restored = client.get("/api/payload", headers=auth).json()
+    assert key in {c["key"] for c in restored["courses"]}
+
+
+def test_unhide_is_idempotent(client, auth):
+    _demo_payload(client, auth)
+    # 没藏过的课也能点「恢复」，不该报错
+    resp = client.delete("/api/hidden/demo:c-none:", headers=auth)
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 0
+
+
+def test_hiding_an_unknown_course_is_a_404(client, auth):
+    _demo_payload(client, auth)
+    resp = client.post("/api/hidden", headers=auth, json={"key": "demo:no-such-course:"})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+def test_hiding_twice_does_not_duplicate_the_key(client, auth, home):
+    payload = _demo_payload(client, auth)
+    key = payload["courses"][0]["key"]
+
+    client.post("/api/hidden", headers=auth, json={"key": key})
+    reply = client.post("/api/hidden", headers=auth, json={"key": key})
+
+    assert reply.json()["count"] == 1
+    saved = json.loads((home / "config.json").read_text(encoding="utf-8"))
+    assert saved["ui"]["hidden_courses"] == [key]
+
+
+def test_hidden_list_endpoint_matches_the_payload(client, auth):
+    payload = _demo_payload(client, auth)
+    key = payload["courses"][0]["key"]
+    client.post("/api/hidden", headers=auth, json={"key": key})
+
+    listed = client.get("/api/hidden", headers=auth).json()
+    assert listed["count"] == 1
+    assert listed["hidden"][0]["key"] == key
+    meta = client.get("/api/payload/meta", headers=auth).json()
+    assert meta["hidden_count"] == 1
+
+
+def test_hide_requires_the_token(client, auth):
+    payload = _demo_payload(client, auth)
+    resp = client.post("/api/hidden", json={"key": payload["courses"][0]["key"]})
+    assert resp.status_code == 401

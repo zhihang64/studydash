@@ -4,6 +4,7 @@
     "generated_at": "2026-03-14T21:05:33+08:00",
     "mode": "demo",
     "readonly": true,
+    "hidden_count": 0,
     "warnings": [
       "icourse163: 使用的是未验证适配器，字段可能与实际不符"
     ]
@@ -202,6 +203,8 @@
       "platform": "chaoxing",
       "platform_name": "超星学习通",
       "id": "123456",
+      "key": "chaoxing:123456:",
+      "term_id": "",
       "name": "数据结构与算法",
       "teacher": "张明",
       "term": "2025-2026-2",
@@ -292,6 +295,8 @@
       "platform": "chaoxing",
       "platform_name": "超星学习通",
       "id": "654321",
+      "key": "chaoxing:654321:",
+      "term_id": "",
       "name": "操作系统",
       "teacher": "李红",
       "term": "2025-2026-2",
@@ -331,6 +336,8 @@
       "platform": "chaoxing",
       "platform_name": "超星学习通",
       "id": "777777",
+      "key": "chaoxing:777777:",
+      "term_id": "",
       "name": "大学英语（四）",
       "teacher": "Wang Lin",
       "term": "2025-2026-2",
@@ -369,6 +376,8 @@
       "platform": "icourse163",
       "platform_name": "中国大学 MOOC",
       "id": "83001",
+      "key": "icourse163:83001:",
+      "term_id": "",
       "name": "计算机网络",
       "teacher": "XJTU 教学组",
       "term": "2026 春",
@@ -442,6 +451,8 @@
       "platform": "icourse163",
       "platform_name": "中国大学 MOOC",
       "id": "83002",
+      "key": "icourse163:83002:",
+      "term_id": "",
       "name": "Python 程序设计",
       "teacher": "王恺",
       "term": "2026 春",
@@ -462,6 +473,8 @@
       "platform": "manual",
       "platform_name": "手动导入",
       "id": "morning-class",
+      "key": "manual:morning-class:",
+      "term_id": "",
       "name": "形势与政策（线下）",
       "teacher": "陈老师",
       "term": "2025-2026-2",
@@ -497,6 +510,7 @@
       ]
     }
   ],
+  "hidden": [],
   "accounts": [
     {
       "platform": "chaoxing",

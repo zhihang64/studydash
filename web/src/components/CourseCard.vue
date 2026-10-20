@@ -16,7 +16,9 @@ import AssignmentItem from './AssignmentItem.vue'
 import PlatformChip from './PlatformChip.vue'
 import ProgressBar from './ProgressBar.vue'
 
-const props = defineProps<{ course: CourseView }>()
+const props = defineProps<{ course: CourseView; busy?: boolean }>()
+
+defineEmits<{ hide: [course: CourseView] }>()
 
 const expanded = ref(false)
 
@@ -90,6 +92,15 @@ const emptyPartHint = computed(() => {
           <a v-if="course.url" class="course__link" :href="course.url" target="_blank" rel="noreferrer noopener">
             打开原页面 ↗
           </a>
+          <button
+            type="button"
+            class="course__hide"
+            :disabled="busy"
+            :title="`隐藏「${course.name}」：作业不再出现在待办和总览里`"
+            @click="$emit('hide', course)"
+          >
+            {{ busy ? '隐藏中…' : '隐藏' }}
+          </button>
         </p>
       </div>
 
@@ -211,6 +222,28 @@ const emptyPartHint = computed(() => {
 
 .course__link {
   font-size: var(--fs-sm);
+}
+
+/* 隐藏是个「低干扰」动作：平时像一截淡淡的文字链，悬停才显出来。 */
+.course__hide {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.course__hide:hover:not(:disabled) {
+  color: var(--warn);
+}
+
+.course__hide:disabled {
+  cursor: progress;
+  opacity: 0.6;
 }
 
 .course__pct {

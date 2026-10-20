@@ -129,8 +129,14 @@ studydash web --port 9000
 | **总览** | 6 张 KPI、平台分布、最要紧的几件、进度告急的几门课 |
 | **待办** | 按 已逾期 / 3 天内 / 7 天内 / …… 分组的 DDL 时间轴，可按平台筛 |
 | **课程** | 搜索 + 排序 + 平台筛选；每门课带分项进度条和可展开的作业明细 |
+| **已隐藏课程** | 从「课程」页进的二级页面：结课/不想再看的课藏在这里，可一键恢复 |
 | **账号** | 在页面里登录绑账号、启用/停用、删账号、单独抓某个平台、探测接口 |
 | **设置** | 深浅主题、抓取参数（超时/限速/重试）、提醒阈值、环境自检 |
+
+「隐藏」是给已经结课、或者这学期不想再占位置的课程准备的：藏起来之后，它和它的
+作业不再出现在总览、待办和平台统计里，但**数据不会被删**——`progress.json` 仍是
+完整的一份，恢复显示不需要重新抓取。隐藏列表存在 `config.json` 的
+`ui.hidden_courses`，按 `平台:课程id:学期id` 记录，所以同一门课的不同学期互不影响。
 
 ### 在页面里登录
 
@@ -142,6 +148,13 @@ studydash web --port 9000
    清掉，不进配置、不进日志、不进任务快照。
 3. **粘贴 Cookie** —— 你已经有 Cookie 的话直接贴。
 4. **本机浏览器** —— 从你日常浏览器里读（要先完全退出它，见下面「隐私」）。
+
+选中**中国大学 MOOC** 时，扫码用的是它自己的协议（二维码由 `icourse163.org` 下发，
+手机要用「中国大学 MOOC」App 扫），账号密码页签会隐藏——那条路还没做，扫码或
+Cookie 都能登。
+
+选中**头歌**时只剩「粘贴 Cookie」和「本机浏览器」两个页签：它没有可复用的扫码
+协议，账号密码登录又要过验证码。浏览器那个页签勾上「另开独立窗口」就能登。
 
 登录是**后台任务**：进度、日志、二维码都通过 SSE 实时推到页面上，可以关掉抽屉去
 看别的，任务在后台继续跑。平台要图形验证码或二次验证时会明确告诉你「改用扫码」，
@@ -222,15 +235,22 @@ studydash login --source password --user 13800000000
 它的 Cookie 就在那里，等于一份本地会话副本——不想留，直接删掉这个目录。扫码和密码这两条
 路不写任何浏览器配置档。
 
-### 超星学习通（status: beta）
+### 超星学习通（status: stable）
 
 `login` 之外，也可以纯命令行把 Cookie 塞进 `config.json`：
 
 ```bash
 studydash init            # 生成 config.json（含注释字段）
 studydash probe chaoxing  # 只读探测，原始响应存到 data/raw/，先确认能通
-studydash fetch           # 抓课程与进度
+studydash fetch           # 抓课程、进度与作业/待办
 studydash build --open    # 渲染 + 打开
+```
+
+**作业/待办默认开启**：列表页一次请求拿全账号的作业，未提交项再逐条读详情页
+拿绝对截止时间。不想抓就关掉；详情请求数量可以用 `max_work_details` 封顶：
+
+```json
+"options": { "works": false, "max_work_details": 60 }
 ```
 
 想让看板也显示章节任务点（视频/阅读/测验），把 `options.chapters` 打开：
@@ -239,7 +259,7 @@ studydash build --open    # 渲染 + 打开
 "options": { "chapters": true, "max_chapters": 40 }
 ```
 
-这条路径是实验性的，可能被平台改版打断，所以超星标注为 `beta`。
+章节任务点这条路径是实验性的，可能被平台改版打断。
 
 **抓不到课程时不要猜。** `studydash fetch` 会直接告诉你它看到了什么：
 
@@ -250,6 +270,72 @@ studydash build --open    # 渲染 + 打开
 ```
 
 这几句话就能分清三种情况：Cookie 失效、账号确实没课、平台改版了。
+
+
+### 中国大学 MOOC（课程 / 进度 / 作业已验证）
+
+扫码走的是 `icourse163.org` 自己的协议（`logonByQRCode`），和超星不是一套：
+
+```bash
+studydash login --platform icourse163            # 终端出码，用「中国大学 MOOC」App 扫
+studydash login --platform icourse163 --source live   # 想在自己熟悉的浏览器里登
+studydash login --platform icourse163 --source manual --cookie "NTESSTUDYSI=..."
+```
+
+二维码约两分钟过期，程序会自动换。手机确认后，工具拿服务端下发的 `token` 换成
+会话 Cookie，再用用户信息接口确认**真的登录了**——`NTESSTUDYSI` 这种 Cookie 在
+未登录的页面上也会下发，只看「有没有 Cookie」会把游客当成已登录。
+
+**账号密码登录还没做**（网易 URS 那条路会碰上验证码/二次验证），请用扫码或
+Cookie。课程数据走两个 RPC，2026-10-20 已用真实账号验证：
+
+| 接口 | 取到什么 |
+| --- | --- |
+| `learnerCourseRpcBean.getMyLearnedCoursePanelList.rpc`（`type=30`） | 我的课程面板：MOOC + SPOC 全部课程、已学/总小节数 |
+| `courseBean.getMocTermDto.rpc`（`termId`, `isDraft=0`, `excludeUnrelease=0`） | 学期章节树，作业/测验/考试及其截止时间、得分 |
+
+两个坑：`csrfKey` 取的是 **`NTESSTUDYSI` Cookie 的值**（不是叫 `csrfKey` 的
+Cookie）；面板接口的参数是 `type`，传 `pageIndex` 会被 `-1007 不含有该参数` 顶回来。
+
+
+### 头歌（课程 / 实训 + 图文作业已验证）
+
+头歌的网页是 React 单页应用，数据走 `/api/*.json`，而且**每个请求都要带 PC 端签名**
+（`X-EDU-Signature = md5(base64("method=GET&ak=…&sk=…&time=毫秒"))`，ak/sk 写在前端
+bundle 里）。少带签名会被顶回 `-102 服务器时间与您的设备时间不匹配`——这句报错是
+幌子，真实原因是签名缺失。
+
+登录页是表单 + 验证码，没有可复用的扫码协议，程序也不替你输密码，所以只有两条路：
+
+```bash
+studydash login --platform educoder --source live     # 开独立窗口，登完自动取会话
+studydash login --platform educoder --source browser  # 读日常浏览器（要先完全退出它）
+studydash login --platform educoder --source manual --cookie "_educoder_session=..."
+```
+
+抓课程、任务和进度用的三个端点：
+
+| 接口 | 取到什么 |
+| --- | --- |
+| `/api/users/get_user_info.json` | 当前登录用户。游客也会返回 200，只是 `login=""`、`username="游客"` |
+| `/api/courses/mine.json` | 「我的课程」列表 |
+| `/api/courses/{id}/homework_commons.json?type=4` | 实训/作业：截止时间、任务点、已发布/已完成计数 |
+| `/api/courses/{id}/homework_commons.json?type=1` | 图文作业：截止时间、交没交 |
+
+几个坑：① 课程列表接口对**游客也返回成功 + 空数组**，拿它判登录会把「会话过期」
+显示成「0 门课」，登录判据必须看 `get_user_info.json`；② 任务接口**默认只回
+`type=4`（实训）**，图文作业要再发一次 `type=1`，不传就整门课的图文作业一条都看不到；
+③ 任务接口默认每页 20 条，要传 `per_page` 才能一次取全；④ `status: ["提交中"]` 是
+「提交窗口还开着」，不是「已提交」——实训完成与否看 `shixun_finished_status == 1`
+或 `student_passed_time` 非空，图文作业看 `un_commit_work`（`false` 才是交了；
+`work_status` 和 `student_work_id` 在没交时也可能有值，不能拿来判）。进度按
+**已完成 / 已发布**合并两类任务（`published_count` 才是分母，`unpublished_count`
+不算；`online_learning.json` 对实训型课程全是 0，别用）。
+
+作业链接用的是**教室里的作业页**：`/classrooms/{课程id}/shixun_homework/{作业id}/detail?tabs=0`
+和 `/classrooms/{课程id}/common_homework/{作业id}/detail`。头歌页面自己给的
+`/shixuns/{identifier}/shixun_exec` 是「进入实战」的动作地址，直接打开会渲染成
+「404 您访问的页面已经离开地球」，别用它。
 
 
 ### 手动导入（最稳，推荐作为兜底）
@@ -286,8 +372,9 @@ unix 时间戳。
 
 | id | 平台 | 状态 | 鉴权 | 说明 |
 | --- | --- | --- | --- | --- |
-| `chaoxing` | 超星学习通 | beta | Cookie | 课程与进度已验证；章节任务点为实验性 |
-| `icourse163` | 中国大学 MOOC | **未验证** | Cookie | 按接口形状写的，字段可能与实际不符 |
+| `chaoxing` | 超星学习通 | stable | Cookie | 课程、进度、作业/待办已验证；章节任务点为实验性 |
+| `icourse163` | 中国大学 MOOC | **beta** | 扫码 / Cookie | 课程、进度、作业/测验/考试已验证（2026-10-20）；成绩单与证书未接入 |
+| `educoder` | 头歌 | **beta** | Cookie | 课程、实训 + 图文作业、截止时间与完成状态已验证（2026-10-20）；登录走「独立窗口」或「读浏览器」，没有扫码/账号密码 |
 | `zhihuishu` | 智慧树 | **未验证** | Cookie | 同上 |
 | `manual` | 手动导入 | stable | 无 | JSON / CSV，可给任意平台打标 |
 | `demo` | 离线演示 | stable | 无 | 内嵌样例，不联网 |
@@ -442,7 +529,9 @@ studydash/
 │   ├── diagnostics.py   `doctor` 的自检项（CLI 与网页版共用一套判断）
 │   ├── login.py         会话获取与校验（六种来源的调度层）
 │   ├── qrlogin.py       超星扫码登录协议        ┐
-│   ├── passlogin.py     超星账号密码登录         ├─ 让工具自己走完登录
+│   ├── mooclogin.py     中国大学 MOOC 扫码登录   ├─ 让工具自己走完登录
+│   ├── educoder_login.py 头歌会话校验/浏览器取会话 │
+│   ├── passlogin.py     超星账号密码登录         │
 │   ├── qr.py            零依赖二维码解码 + 终端渲染 │
 │   ├── aes.py           纯 Python AES-128-CBC    ┘
 │   ├── browsers.py      读浏览器 Cookie（DPAPI + AES-GCM）
@@ -455,9 +544,9 @@ studydash/
 │   │   ├── routers/     system / accounts / tasks / data
 │   │   └── static/      前端构建产物（要进仓库）
 │   ├── templates/dashboard.html   静态看板模板（单文件自包含）
-│   └── providers/       适配器：chaoxing / icourse163 / zhihuishu / manual / demo
+│   └── providers/       适配器：chaoxing / icourse163 / educoder / zhihuishu / manual / demo
 ├── web/                 Vue 3 + TypeScript 前端源码（Vite）
-├── tests/               435 个用例（pytest）
+├── tests/               555 个用例（pytest）
 ├── docs/                payload 契约、web API 契约、插件文档、预览图
 ├── tools/               图标生成、PyInstaller 入口、前端/打包脚本、版本资源模板
 ├── assets/              icon.png / icon.ico（由 tools/make_icon.py 生成）
@@ -547,15 +636,16 @@ git push origin main v3.1.0
 
 ## 已知限制
 
-- **两个适配器未验证**（`icourse163` / `zhihuishu`）。字段是照接口形状写的，可能对不上。
-  看板会给它们挂提示，不会假装数据可信。欢迎拿 `probe` 的存档提 issue 修正。
-- **超星的课程列表解析没有真实账号复验过**。逻辑来自 v1 时期能跑通的那版列表页结构，
-  v2 加了登录能力之后还没拿真账号端到端跑过——所以超星标 `beta`，所以解析失败时它会
-  把「响应多少字节、是不是登录页、有没有 `courseList`、里面几个 `<li>`」直接打出来。
-  如果你跑出来是空的，把那四句话贴到 issue，适配器当天就能修。
-- **超星的章节任务点**是实验性的（`options.chapters`）。
-- **列表页通常只给总百分比**，不给分项任务点数，也不给 DDL。这类数据要看板显示，
-  得靠手动导入补——把散落各处的 deadline 拢到一处，本身就是这个工具最值钱的部分。
+- **只有一个适配器未验证**（`zhihuishu`）。字段是照接口形状写的，可能对不上。
+  看板会给它挂提示，不会假装数据可信。欢迎拿 `probe` 的存档提 issue 修正。
+- **中国大学 MOOC 是 beta**：课程、进度、作业/测验/考试都已用真实账号验证，
+  但成绩单、证书等外围数据还没接。接口改版时用 `studydash probe icourse163` 留档。
+- **超星的章节任务点**是实验性的（`options.chapters`）。课程、进度与作业列表都已用
+  真实账号验证（2026-10-19）；解析失败时它会把「响应多少字节、是不是登录页、有没有
+  `courseList`、里面几个 `<li>`」直接打出来，便于定位是 Cookie 还是改版。
+- **部分平台/课程只给总百分比**，不给分项任务点数，也不给 DDL。超星作业的 DDL 已经
+  能读出来；其它来源拿不到的，仍可以靠手动导入补——把散落各处的 deadline 拢到一处，
+  本身就是这个工具最值钱的部分。
 - **静态看板**：数据在渲染时内嵌，刷新页面不会重新抓取；更新要重跑 `build`/`fetch`。
   网页版没有这个问题（每次都读最新的 `data/progress.json`）。
 - **网页版只能本机访问**。想从手机看，用 `studydash serve`——它只发布静态看板，
@@ -613,3 +703,5 @@ git push origin main v3.1.0
 ## License
 
 [MIT](LICENSE)
+
+

@@ -32,7 +32,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import __version__, diagnostics, login, passlogin, qrlogin
+from . import __version__, diagnostics, educoder_login, login, mooclogin, passlogin, qrlogin
 from .aggregate import aggregate, build_payload, demo_courses, summary_lines
 from .log import Log
 from .model import SCHEMA_VERSION, Account, classify_all, iso, now
@@ -367,6 +367,19 @@ def _ask_credentials(args: argparse.Namespace) -> tuple[str, str]:
     return username, password
 
 
+def _login_module(platform: str):
+    """拿到这个平台的登录模块（``check`` / ``from_browser`` / ``from_live``）。
+
+    三个模块的函数名和签名刻意保持一致，按平台分派就够了；各平台的登录协议
+    差别太大，别在这里做「通用登录」。
+    """
+    if platform == "icourse163":
+        return mooclogin
+    if platform == "educoder":
+        return educoder_login
+    return login
+
+
 def cmd_login(args: argparse.Namespace) -> int:
     """取一次会话：取到 → 验一下 → 存进配置。"""
     ctx = Ctx(args)
@@ -374,6 +387,21 @@ def cmd_login(args: argparse.Namespace) -> int:
     source = _opt(args, "source", "qr") or "qr"
     platform = _opt(args, "platform", "chaoxing") or "chaoxing"
     label = _opt(args, "label")
+
+    # 没有登录实现的平台只能「导 Cookie」，而且不能验证——验证器是各平台自己的。
+    # 没有这道闸，选智慧树会拿超星的协议去登录，用户怎么都登不上。
+    meta = next((item for item in metas() if item.id == platform), None)
+    if meta is None:
+        ctx.log.error(f"没有这个平台：{platform}（用 `studydash platforms` 看可选值）")
+        return 2
+    if not meta.login and (source in ("qr", "password", "live", "browser") or not _flag(args, "no_check")):
+        ctx.log.error(f"{meta.name} 还没有登录流程支持。")
+        ctx.log.info(
+            f"→ 先在那个平台的网页里登录，再：\n"
+            f"  studydash login --platform {platform} --source manual --cookie \"…\" --no-check\n"
+            f"  （--no-check 是必须的：这个平台还没有自己的登录态自检）"
+        )
+        return 2
 
     # qr / password 这两条路自己就会验证会话，所以走过它们之后不必再验一次；
     # 其余四条只拿到 Cookie，验不验由 --no-check 决定。
@@ -383,30 +411,54 @@ def cmd_login(args: argparse.Namespace) -> int:
 
     try:
         if source == "qr":
+            if platform == "educoder":
+                raise login.LoginError(
+                    "头歌没有可复用的扫码登录协议。\n"
+                    "  → 改用 `--source live`（独立窗口登录）或 `--source browser`。"
+                )
             on_code, on_tick = _qr_callbacks(ctx.log)
-            session = qrlogin.login(
-                timeout=float(_opt(args, "timeout") or 0) or 240.0,
-                log=ctx.log,
-                on_code=on_code,
-                on_tick=on_tick,
-            )
+            if platform == "icourse163":
+                ctx.log.step("向中国大学 MOOC 要一张登录二维码")
+                session = mooclogin.login(
+                    timeout=float(_opt(args, "timeout") or 0) or 240.0,
+                    log=ctx.log,
+                    on_code=on_code,
+                    on_tick=on_tick,
+                )
+            else:
+                session = qrlogin.login(
+                    timeout=float(_opt(args, "timeout") or 0) or 240.0,
+                    log=ctx.log,
+                    on_code=on_code,
+                    on_tick=on_tick,
+                )
             cookie, verified = session.cookie, True
         elif source == "password":
+            if platform == "icourse163":
+                raise login.LoginError(
+                    "中国大学 MOOC 还不支持账号密码登录。\n"
+                    "  → 改用 `--source qr` 扫码，或 `--source live` 在浏览器里登录。"
+                )
+            if platform == "educoder":
+                raise login.LoginError(
+                    "头歌的账号密码登录要过验证码，程序没法替你完成。\n"
+                    "  → 改用 `--source live` 在独立窗口里登录，或 `--source browser`。"
+                )
             username, password = _ask_credentials(args)
             ctx.log.step(f"用账号密码登录（{username}）")
             session = passlogin.login(username, password, log=ctx.log)
             cookie, verified = session.cookie, True
         elif source == "live":
             ctx.log.step("起一个独立浏览器去登录（不影响你原来开着的浏览器）")
-            cookie = login.from_live(
+            cookie = _login_module(platform).from_live(
                 browser=_opt(args, "browser", "edge") or "edge",
                 port=int(_opt(args, "port") or 0) or None,
                 timeout=float(_opt(args, "timeout") or 0) or 300.0,
                 log=ctx.log,
             )
         elif source == "browser":
-            ctx.log.step("读浏览器配置档里的超星 Cookie")
-            cookie = login.from_browser(
+            ctx.log.step(f"读浏览器配置档里的{meta.name} Cookie")
+            cookie = _login_module(platform).from_browser(
                 _opt(args, "browser", "edge") or "edge",
                 profile=_opt(args, "profile"),
             )
@@ -450,20 +502,21 @@ def cmd_login(args: argparse.Namespace) -> int:
     if verified and session is not None:
         pass
     elif not _flag(args, "no_check"):
-        ctx.log.step("验证这个会话在超星上真能用")
-        session = login.check(cookie, log=ctx.log)
+        ctx.log.step(f"验证这个会话在{meta.name}上真能用")
+        session = _login_module(platform).check(cookie, log=ctx.log)
         if not session.ok:
             ctx.log.error(f"这个会话不管用：{session.message}")
             ctx.log.info("→ 多半是没登录完成，或 Cookie 不全。重跑 `studydash login` 再登一次。")
             return 1
-        ctx.log.ok(f"会话可用（uid={session.uid}）")
+        ctx.log.ok(f"会话可用（uid={session.uid or '未知'}）")
     else:
         # 没验证也顺手从 Cookie 里抠出 uid：账号名要靠它区分，不然多个账号在配置里
-        # 全叫「默认」，用户根本分不清自己在看谁。
+        # 全叫「默认」，用户根本分不清自己在看谁。超星的 uid 就写在 Cookie 里；
+        # 其他平台得问了才知道，跳过自检时留空。
         session = login.Session(
             cookie=cookie,
             source=source,
-            uid=login.uid_from_cookie(cookie),
+            uid=login.uid_from_cookie(cookie) if platform == "chaoxing" else "",
             cookie_count=login.cookie_count(cookie),
             message="未验证",
         )

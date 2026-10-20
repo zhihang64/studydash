@@ -164,6 +164,9 @@ class ProviderMeta:
     status: str = "beta"
     color: str = "#64748b"
     auth: str = "cookie"
+    #: 网页版 / 命令行是否真的实现了这个平台的登录流程。False 表示只能手工导入
+    #: Cookie——不要拿别的平台的协议冒充它（MOOC 与超星就是完全两套）。
+    login: bool = False
     homepage: str = ""
     #: 最近一次由真人用真实账号验证通过的日期（YYYY-MM-DD）。空 = 从没验证过。
     verified: str = ""
@@ -203,6 +206,7 @@ class ProviderMeta:
             "status_label": STATUS_LABEL.get(self.status, self.status),
             "color": self.color,
             "auth": self.auth,
+            "login": self.login,
             "homepage": self.homepage,
             "verified": self.verified,
             "note": self.note,

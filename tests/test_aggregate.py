@@ -11,7 +11,7 @@ from datetime import timedelta
 
 import pytest
 
-from studydash.aggregate import aggregate, build_payload, summary_lines
+from studydash.aggregate import aggregate, build_payload, course_key, filter_payload, summary_lines
 from studydash.model import Progress
 from studydash.providers import AccountConfig, AuthError, ProviderError
 from studydash.store import Config
@@ -121,8 +121,10 @@ def test_healthy_but_empty_platform_is_not_a_card(two_courses, config):
 
 
 def test_unverified_platform_raises_a_warning(two_courses, config):
-    warnings = build_payload(two_courses, [], config)["meta"]["warnings"]
-    assert any("中国大学 MOOC" in w and "未验证" in w for w in warnings)
+    """慕课已验证（beta），所以拿还没验证的智慧树来测这条警告。"""
+    courses = [*two_courses, make_course("z1", name="创业基础", platform="zhihuishu")]
+    warnings = build_payload(courses, [], config)["meta"]["warnings"]
+    assert any("智慧树" in w and "未验证" in w for w in warnings)
 
 
 def test_empty_result_gets_an_actionable_warning(config):
@@ -332,3 +334,92 @@ def test_pending_points_zero_is_not_reported(config):
     courses[0].extra["task_points_pending"] = 0
     payload = build_payload(courses, [], config)
     assert "pending_points" not in payload["courses"][0]
+
+
+# --------------------------------------------------------------------------- #
+# 隐藏课程
+# --------------------------------------------------------------------------- #
+
+def test_course_key_includes_the_term(config):
+    """同一门课的两个学期必须是两个键，否则藏一个学期会把另一个也藏了。"""
+    first = make_course("c1", name="高数", platform="icourse163")
+    first.extra["term_id"] = "t1"
+    second = make_course("c1", name="高数", platform="icourse163")
+    second.extra["term_id"] = "t2"
+
+    assert course_key(first) == "icourse163:c1:t1"
+    assert course_key(first) != course_key(second)
+    # 没有学期信息时也不能崩，只是第三段为空
+    assert course_key(make_course("c9", platform="demo")) == "demo:c9:"
+
+
+def test_filter_payload_moves_the_course_and_its_assignments(two_courses, config):
+    payload = build_payload(two_courses, [], config)
+    chaoxing = next(c for c in payload["courses"] if c["platform"] == "chaoxing")
+
+    filtered = filter_payload(payload, [chaoxing["key"]])
+
+    assert [c["id"] for c in filtered["courses"]] == ["c2"]
+    assert filtered["hidden"][0]["key"] == chaoxing["key"]
+    assert filtered["hidden"][0]["pending"] == chaoxing["pending"]
+    # 隐藏页不需要作业明细，省得把整份列表再传一遍
+    assert "assignments" not in filtered["hidden"][0]
+    # 它的作业必须从时间线上消失
+    assert all(a["course_id"] != "c1" for a in filtered["timeline"])
+    assert filtered["meta"]["hidden_count"] == 1
+
+
+def test_filter_payload_recounts_overview_instead_of_leaving_stale_numbers(two_courses, config):
+    payload = build_payload(two_courses, [], config)
+    before = payload["overview"]
+    hidden = next(c for c in payload["courses"] if c["platform"] == "chaoxing")
+
+    after = filter_payload(payload, [hidden["key"]])["overview"]
+
+    assert after["courses"] == before["courses"] - 1
+    assert after["platforms"] == 1
+    assert after["overdue"] == before["overdue"] - hidden["overdue"]
+    assert after["done"] == before["done"] - hidden["done"]
+
+
+def test_filter_payload_drops_a_platform_card_with_nothing_left(two_courses, config):
+    payload = build_payload(two_courses, [], config)
+    hidden = next(c for c in payload["courses"] if c["platform"] == "chaoxing")
+
+    filtered = filter_payload(payload, [hidden["key"]])
+
+    assert {c["id"] for c in filtered["platforms"]} == {"icourse163"}
+
+
+def test_filter_payload_does_not_mutate_the_stored_payload(two_courses, config):
+    """progress.json 必须保持完整，取消隐藏才能不重新抓取。"""
+    payload = build_payload(two_courses, [], config)
+    hidden = next(c for c in payload["courses"] if c["platform"] == "chaoxing")
+
+    filter_payload(payload, [hidden["key"]])
+
+    assert len(payload["courses"]) == 2
+    assert "hidden" not in payload
+    assert "hidden_count" not in payload["meta"]
+
+
+def test_filter_payload_with_no_hidden_keys_is_a_noop_on_content(two_courses, config):
+    payload = build_payload(two_courses, [], config)
+    filtered = filter_payload(payload, [])
+
+    assert [c["id"] for c in filtered["courses"]] == [c["id"] for c in payload["courses"]]
+    assert filtered["hidden"] == []
+    assert filtered["overview"]["courses"] == payload["overview"]["courses"]
+
+
+def test_filter_payload_tolerates_old_cards_without_a_key(config):
+    """升级前生成的 progress.json 没有 key 字段，读的时候要能补齐。"""
+    payload = build_payload([make_course("c1", platform="demo")], [], config)
+    for card in payload["courses"]:
+        card.pop("key", None)
+        card.pop("term_id", None)
+
+    filtered = filter_payload(payload, ["demo:c1:"])
+
+    assert filtered["courses"] == []
+    assert filtered["hidden"][0]["name"] == payload["courses"][0]["name"]

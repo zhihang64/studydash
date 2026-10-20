@@ -62,9 +62,9 @@ export const useCatalogStore = defineStore('catalog', () => {
     return 'neutral'
   }
 
-  /** 能真登录的平台：demo 是纯样例数据，manual 是手工导入，都不需要登录。 */
+  /** 能真登录的平台：后端必须显式声明 ``login``；demo 是纯样例数据。 */
   function loginable(): PlatformMeta[] {
-    return platforms.value.filter((p) => p.auth !== 'none' && p.id !== 'demo')
+    return platforms.value.filter((p) => p.login === true)
   }
 
   async function load(force = false): Promise<void> {

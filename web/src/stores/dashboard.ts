@@ -65,6 +65,12 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const generatedAt = computed(() => payload.value?.meta?.generated_at ?? '')
   const isDemo = computed(() => mode.value === 'demo')
 
+  /** 已隐藏的课程（后端过滤时一起给出的精简卡）。 */
+  const hiddenCourses = computed(() => payload.value?.hidden ?? [])
+  const hiddenCount = computed(() => hiddenCourses.value.length)
+  /** 正在隐藏 / 取消隐藏的课程键，用来禁用按钮。 */
+  const hiding = ref('')
+
   const hasData = computed(() => courses.value.length > 0)
 
   /** 有进度或作业数据的课程。平台平均值、整体进度都只能拿这些去算。 */
@@ -190,6 +196,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
       ...raw,
       courses: raw.courses.map((course) => ({
         ...course,
+        // 后端会给 key；旧版 progress.json 没有时按同样的规则补一个，
+        // 否则「隐藏」按钮会传来 undefined。
+        key: course.key || `${course.platform}:${course.id}:${course.term_id ?? ''}`,
         ratio: course.has_data === false ? null : (course.progress ?? null),
       })),
     }
@@ -229,6 +238,35 @@ export const useDashboardStore = defineStore('dashboard', () => {
     }
   }
 
+  /* -------------------------------------------------------------- 隐藏课程 */
+
+  /**
+   * 隐藏一门课。隐藏是**后端**的事：时间线、总览数字、平台卡都会跟着重算，
+   * 所以这里不做本地过滤，直接重新拉一份 payload —— 让「哪些数字算进去了」
+   * 只有一个真相来源。
+   */
+  async function hideCourse(key: string): Promise<void> {
+    if (!key || hiding.value) return
+    hiding.value = key
+    try {
+      await api.hideCourse(key)
+      await load()
+    } finally {
+      hiding.value = ''
+    }
+  }
+
+  async function unhideCourse(key: string): Promise<void> {
+    if (!key || hiding.value) return
+    hiding.value = key
+    try {
+      await api.unhideCourse(key)
+      await load()
+    } finally {
+      hiding.value = ''
+    }
+  }
+
   return {
     payload,
     loading,
@@ -249,6 +287,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
     generatedAt,
     isDemo,
     hasData,
+    hiddenCourses,
+    hiddenCount,
+    hiding,
     availablePlatforms,
     visibleCourses,
     timelineGroups,
@@ -256,5 +297,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     clearFilters,
     load,
     loadDemo,
+    hideCourse,
+    unhideCourse,
   }
 })

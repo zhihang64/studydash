@@ -3,6 +3,71 @@
 本文件格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- **超星作业 / 待办接入**（`providers/chaoxing.py`，真实账号验证 2026-10-19）：
+  看板不再恒为「待办 0 项」。作业列表走手机版 `/mooc-ans/work/stu-work`，一次 GET
+  拿全账号的作业（实测 21 条跨 9 门课），解析标题、所属课程、提交状态；未提交项再
+  逐条读详情页取**绝对截止时间**（列表页只给「剩余 X 小时」），已提交/已完成项不发
+  多余请求。详情请求数量由 `options.max_work_details` 封顶（默认 60），`options.works`
+  可整体关闭。
+- 截止时间只有「月-日 时:分」，年份用列表里的剩余时间对齐——12 月看到 `01-05`
+  不会被补成今年已逾期。
+- `probe_plan` 增加作业列表端点，`studydash probe chaoxing` 会把原始响应一起留档。
+- **中国大学 MOOC 扫码登录**（`mooclogin.py`，协议实测 2026-10-19）：之前网页里选
+  `icourse163` 仍然弹超星的码，用 MOOC App 根本扫不了。现在按 `icourse163.org` 自己
+  的 `logonByQRCode` 协议出码（`code.do` → `poll.do` → `mocMobChangeCookie.htm`），
+  终端和网页版都能用；`--platform icourse163` 的 `qr / live / browser / file /
+  manual` 全部走 MOOC 自己的端点与登录态自检（用户信息 RPC），不再拿超星的
+  `_uid` / 课程列表页去判断。
+- 网页版登录面板按平台切换文案与可用方式：选 MOOC 时隐藏「账号密码」（尚未实现），
+  扫码提示改成「中国大学 MOOC」App。
+- **登录能力改为平台显式声明**（`ProviderMeta.login`）：`chaoxing` / `icourse163` /
+  `educoder` 为 `true`。没有实现的平台（如智慧树）不再被放进网页版登录下拉框，
+  后端也会明确拒绝，不会再拿超星的协议冒充；这类平台仍可用「粘贴 Cookie + 关闭
+  验证」导入。
+- **中国大学 MOOC 课程 / 进度 / 作业接入**（`providers/icourse163.py`，真实账号验证
+  2026-10-20）：登录成功之后一直只有「0 门课」。现在走
+  `learnerCourseRpcBean.getMyLearnedCoursePanelList.rpc`（`type=30`）一次拿到
+  MOOC + SPOC 全部课程与「已学/总小节」，再用 `courseBean.getMocTermDto.rpc` 逐学期
+  取章节树里的作业、测验、考试（名称、截止时间、得分）。实测 12 门课 / 147 条。
+  同时修掉两个致命参数错误：`csrfKey` 要取 `NTESSTUDYSI` 的值（原来找的是同名
+  Cookie，永远为空 → 被判「非法跨域请求」），面板接口的参数是 `type` 而不是
+  `pageIndex`（后者会被 `-1007 不含有该参数` 顶回来）。适配器状态 `unverified → beta`。
+- **隐藏课程**（网页版）：结课或不想再占位置的课程可以在「课程」页一键隐藏，进入
+  「课程 → 已隐藏课程」二级页面，随时恢复。隐藏后该课程及其作业不再出现在总览、
+  待办与平台统计里；`progress.json` 保持完整，恢复不需要重新抓取。隐藏列表存在
+  `config.json` 的 `ui.hidden_courses`，键为 `平台:课程id:学期id`（同一门课的不同
+  学期互不影响）。新增 `GET/POST /api/hidden`、`DELETE /api/hidden/{key}`，payload
+  多出一个 `hidden` 数组与 `meta.hidden_count`。
+- **头歌（educoder）平台接入**（`providers/educoder.py`，真实账号验证 2026-10-20）：
+  课程、实训任务 + 图文作业、截止时间与完成状态。接口是 **GET + PC 端签名**
+  （`md5(base64("method=GET&ak=…&sk=…&time=毫秒"))`），少带签名会拿到误导性的
+  `-102 服务器时间与您的设备时间不匹配`。`homework_commons.json` **默认只回
+  `type=4`（实训）**，图文作业是另一批数据（`type=1`），要再发一次请求；完成与否
+  实训看 `shixun_finished_status`（不是 `status` 文案），图文作业看
+  `un_commit_work`。进度按两类合并的「已完成 / 已发布任务」。实测 9 门课 / 154 条
+  任务（实训 96 + 图文 58）。
+- **头歌作业链接修正**：之前用的是页面里的 `/shixuns/{identifier}/shixun_exec`，
+  那是「进入实战」的动作地址，从看板点过去会被头歌渲染成「404 您访问的页面已经
+  离开地球」。现在改用教室里的作业详情页
+  `/classrooms/{课程id}/shixun_homework/{作业id}/detail?tabs=0`（实训）和
+  `/classrooms/{课程id}/common_homework/{作业id}/detail`（图文作业），已用无头
+  Edge 逐个渲染确认不再 404。
+- **头歌登录**（`educoder_login.py`）：登录页是表单 + 验证码，没有可复用的扫码
+  协议，也不替你输密码。提供「粘贴 Cookie」「读本机浏览器」「独立窗口登录」三条路，
+  网页版登录面板在选中头歌时只显示后两类页签；`login_qr` / `login_password` 会被
+  明确拒绝并提示改用哪条路，而不是拿超星的协议去撞。
+
+### 说明
+
+- 只读边界不变：作业列表与详情都是 GET，不碰任何提交/答题接口；MOOC 的登录态自检
+  与课程/作业查询都是只读 RPC（在 `HttpClient` 查询端点白名单里显式声明）。
+- MOOC 适配器升为 `beta`：课程、进度、作业/测验/考试已验证，成绩单与证书还没接。
+- 头歌适配器标 `beta`：课程、实训、图文作业已验证；登录态自检同样只发带签名的 GET。
+
 ## [3.0.0] - 2026-10-19
 
 **从「命令行工具」变成「打开就能用的本地网页应用」**：v3 的主界面是一个只跑在本机的

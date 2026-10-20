@@ -6,9 +6,12 @@
 验证状态
 --------
 * 课程列表 + 课程进度：**已验证**（逻辑自 v1 迁移，长期在用）
-* 章节任务点 / 作业 / 测验：**实验性**，默认关闭。用 ``options.chapters: true``
-  打开。这段依赖 ``knowledge/cards`` 的响应结构，平台改版就会失效——失效时
-  会明确报警告，而不是安静地返回空列表。怀疑失效时跑::
+* **作业 / 待办列表：已验证**（2026-10-19，真实账号 21 条跨 9 门课）。数据在
+  手机版 ``/mooc-ans/work/stu-work`` 的服务端直出 HTML 里，一次 GET 就拿到全账号
+  的作业；未提交项再逐条读详情页拿**绝对截止时间**（列表页只给「剩余 X 小时」）。
+* 章节任务点：**实验性**，默认关闭。用 ``options.chapters: true`` 打开。这段依赖
+  ``knowledge/cards`` 的响应结构，平台改版就会失效——失效时会明确报警告，而不是
+  安静地返回空列表。怀疑失效时跑::
 
       studydash probe chaoxing
 
@@ -19,12 +22,13 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta
 from html import unescape as _unescape
 from typing import Any
 
 from ..http import HttpError
 from ..log import Log
-from ..model import Assignment, Course, Progress, parse_dt
+from ..model import Assignment, Course, Progress, now, parse_dt
 from .base import AuthError, Provider, ProviderError, ProviderMeta, register
 
 # --------------------------------------------------------------------------- #
@@ -44,6 +48,10 @@ EP_KNOWLEDGE_CARDS = (
     "?clazzid={clazzid}&courseid={courseid}&knowledgeid={knowledgeid}"
     "&num=0&ut=s&cpi={cpi}&v={ts}&mooc2=1"
 )
+#: 作业列表（手机版）。**不带任何课程参数**也返回全账号的作业，一次 GET 就够：
+#: 传 courseId 反而只是被忽略（实测三种写法响应完全相同）。列表里同时有课程 id、
+#: 标题、提交状态和「剩余 X 小时」，未提交项的绝对截止时间在详情页。
+EP_WORK_LIST = "https://mooc1.chaoxing.com/mooc-ans/work/stu-work?ut=s"
 
 # --------------------------------------------------------------------------- #
 # 正则
@@ -141,6 +149,69 @@ RE_ITEM_JOBS = re.compile(
 )
 RE_ATTR = re.compile(r"\b([\w-]+)=[\"']([^\"']*)[\"']")
 
+# --------------------------------------------------------------------------- #
+# 作业列表（手机版 /work/stu-work）
+# --------------------------------------------------------------------------- #
+#
+# 真实结构（2026-10 实测）::
+#
+#     <li onclick="goTask(this);" data="https://mooc1.chaoxing.com/mooc-ans/
+#         android/mtaskmsgspecial?taskrefId=56258341&...&courseId=266688496
+#         &clazzId=153613588&type=work&enc_task=…">
+#       <div role="option">
+#         <p aria-hidden="true">第5章 参数估计</p>
+#         <span class="status" aria-hidden="true">未提交</span>
+#         <span aria-hidden="true">《大数据统计分...》</span>
+#         <span class="fr" aria-hidden="true">剩余995小时51分钟</span>
+#       </div>
+#     </li>
+#
+# 已完成/待批阅的条目没有 ``class="status"``，状态直接写成
+# ``<span aria-hidden="true">已完成</span>``，而且**没有**「剩余…」。
+# 列表里的课程名被截断成「大数据统计分...」，所以课程名一律按 courseId 回查课程
+# 列表，别信这段显示文本。
+RE_WORK_ITEM = re.compile(
+    r"<li\b[^>]*\bonclick=[\"']goTask\(this\);[\"'][^>]*>", re.I
+)
+RE_WORK_DATA = re.compile(r"\bdata=[\"']([^\"']+)[\"']", re.I)
+RE_WORK_TITLE = re.compile(r"<p\b[^>]*>(.*?)</p>", re.S | re.I)
+RE_WORK_STATUS = re.compile(
+    r"<span\b[^>]*\bclass=[\"'][^\"']*\bstatus\b[^\"']*[\"'][^>]*>(.*?)</span>",
+    re.S | re.I,
+)
+RE_WORK_STATUS_TEXT = re.compile(
+    r"<span\b[^>]*\baria-hidden=[\"']true[\"'][^>]*>\s*"
+    r"(未提交|待批阅|已批阅|已完成|已过期|未开始)\s*</span>",
+    re.I,
+)
+RE_WORK_COURSE_DISPLAY = re.compile(r"《([^》]*)》")
+RE_WORK_REMAIN_HM = re.compile(r"剩余\s*(\d+)\s*小时\s*(\d+)\s*分钟")
+RE_WORK_REMAIN_M = re.compile(r"剩余\s*(\d+)\s*分钟")
+RE_WORK_REMAIN_D = re.compile(r"剩余\s*(\d+)\s*天(?:\s*(\d+)\s*小时)?")
+RE_WORK_DUE_TEXT = re.compile(
+    r"截止时间\s*[：:]\s*(\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})"
+)
+RE_WORK_DUE_ARIA = re.compile(
+    r"截止时间\s*(\d{1,2})月(\d{1,2})日"
+    r"(\d{1,2})时(\d{2})分(?:(\d{2})秒)?"
+)
+#: 已完成作业详情页顶部的分数：``<p class="Number"> 100 <span>分</span>``
+RE_WORK_SCORE = re.compile(
+    r"class=[\"'][^\"']*\bNumber\b[^\"']*[\"'][^>]*>\s*(\d+(?:\.\d+)?)\s*(?:<|分)", re.I
+)
+
+#: 列表里的状态文案 -> (模型 status, 是否已完成)。
+#: ``已完成``／``待批阅`` 都算完成（一个已出分、一个等老师批），
+#: 这样 ``classify_all`` 会把它们归到 ``done``，不会跑进待办里催人。
+_WORK_STATUS_MAP: dict[str, tuple[str, bool]] = {
+    "未提交": ("pending", False),
+    "未开始": ("pending", False),
+    "已过期": ("pending", False),
+    "待批阅": ("submitted", True),
+    "已批阅": ("graded", True),
+    "已完成": ("submitted", True),
+}
+
 #: 章节任务点里 attachment 的 module/type -> 统一 kind
 _KIND_MAP = (
     ("insertaudio", "video"),
@@ -194,11 +265,11 @@ class ChaoxingProvider(Provider):
         status="stable",
         color="#3b82f6",
         auth="cookie",
+        login=True,
         homepage="https://i.chaoxing.com",
         verified="2026-10-19",
-        note="课程列表与任务点进度（已完成任务点 X/Y）已用真实账号验证；"
-        "章节任务点明细可开（options.chapters）。"
-        "作业与待办尚未接入——待办显示 0 不代表没有作业，请到课程页确认。",
+        note="课程列表、任务点进度（已完成任务点 X/Y）与作业/待办列表都已用真实账号"
+        "验证；作业带截止时间与提交状态。章节任务点明细可开（options.chapters）。",
     )
 
     # ------------------------------------------------------------------ #
@@ -246,6 +317,9 @@ class ChaoxingProvider(Provider):
         if self.account.options.get("progress", True):
             self._fill_progress(courses)
 
+        if self.account.options.get("works", True):
+            self._fill_works(courses)
+
         if self.account.options.get("chapters"):
             self._enrich_with_chapters(courses)
 
@@ -253,7 +327,7 @@ class ChaoxingProvider(Provider):
         return courses
 
     def probe_plan(self) -> list[tuple[str, str]]:
-        plan = [("课程列表", EP_COURSE_LIST)]
+        plan = [("课程列表", EP_COURSE_LIST), ("作业列表", EP_WORK_LIST)]
         extra = str(self.account.options.get("probe_course", "")).strip()
         if extra:
             cid, _, clz = extra.partition(":")
@@ -614,6 +688,201 @@ class ChaoxingProvider(Provider):
         return info
 
     # ------------------------------------------------------------------ #
+    # 作业 / 待办
+    # ------------------------------------------------------------------ #
+
+    def _fill_works(self, courses: list[Course]) -> None:
+        """读作业列表并挂到对应课程上。
+
+        列表页一次 GET 返回全账号的作业（2026-10 实测 21 条 / 9 门课），
+        所以这里不是「每门课一次请求」。列表本身只写「剩余 X 小时」，
+        未提交项的**绝对截止时间**要到详情页拿；已提交/已完成的项不需要
+        截止时间（``classify_all`` 会按状态直接归到 ``done``），因此只对
+        还没交的项发详情请求，用 ``max_work_details`` 封顶。
+        """
+        html = self.http.get_text(EP_WORK_LIST, note="作业列表")
+        if not html:
+            self.log.warn(
+                "作业列表没有返回内容，本次待办会是空的（不代表没有作业）。"
+                "稍后重试；若持续失败，跑 `studydash probe chaoxing` 留档排查。"
+            )
+            return
+
+        items = self._parse_work_list(html)
+        if not items:
+            # 真的没有作业，和「页面结构变了」在这里长得一样。用结构特征区分：
+            # 列表页必然有 goTask 点击绑定或「作业列表」标题。
+            if "goTask" not in html and "作业列表" not in html:
+                self.log.warn(
+                    "作业列表页结构无法识别（可能是平台改版），本次待办为空。"
+                    "跑 `studydash probe chaoxing` 取原始响应后修 providers/chaoxing.py。"
+                )
+            return
+
+        by_id = {course.id: course for course in courses}
+        cap = int(self.account.options.get("max_work_details", 60))
+        details = 0
+        attached = 0
+
+        for item in items:
+            course = by_id.get(item["course_id"])
+            if course is None:
+                # 课程列表里没有这门课（课程解析漏了/选了别的学期）。不造假课程，
+                # 但留一条 debug，免得以后排查时以为作业凭空消失。
+                self.log.debug(
+                    f"  作业 {item['title']!r} 的课程 {item['course_id']}"
+                    f"（{item['course_display'] or '显示名未知'}）不在课程列表里，跳过"
+                )
+                continue
+
+            status, finished = _WORK_STATUS_MAP.get(
+                item["status"], ("unknown", False)
+            )
+            due: datetime | None = None
+            score: float | None = None
+
+            if not finished:
+                if details < cap:
+                    detail = self._work_detail(item["url"])
+                    details += 1
+                    due = detail["due"]
+                    score = detail["score"]
+                if due is not None:
+                    # 详情页的截止时间没写年份（``11-30 10:04``）。用列表里的
+                    # 「剩余 X 小时」当锚点挑年份，跨年（12 月看到 1 月）也不会
+                    # 把明年的 DDL 算成今年已逾期。
+                    due = _align_deadline_year(due, item["remaining_hours"])
+                elif item["remaining_hours"] is not None:
+                    due = now() + timedelta(hours=item["remaining_hours"])
+
+            if score is not None and status == "submitted":
+                status = "graded"
+
+            # 「待批阅」和「已完成」都算 done，但前者还没出分，值得在卡片上
+            # 留一句——否则用户看到「已完成」会以为已经批完了。
+            detail = item["status"] if item["status"] in {"待批阅", "已批阅"} else ""
+
+            course.assignments.append(
+                Assignment(
+                    id=item["id"],
+                    title=item["title"],
+                    platform=self.meta.id,
+                    course_id=course.id,
+                    course=course.name,
+                    kind="homework",
+                    status=status,
+                    due=due,
+                    score=score,
+                    url=item["url"],
+                    detail=detail,
+                    platform_name=self.meta.name,
+                )
+            )
+            attached += 1
+
+        self.log.debug(
+            f"  作业：列表 {len(items)} 条，挂到 {attached} 门课的明细上"
+            f"（读了 {details} 个详情页）"
+        )
+
+    def _parse_work_list(self, html: str) -> list[dict[str, Any]]:
+        """解析手机版作业列表，返回普通 dict（方便单测，不直接造 Assignment）。
+
+        按 ``<li onclick="goTask(this)">`` 的开口锚点切块，和课程列表同一套思路：
+        不拿 ``</li>`` 当右边界，避免被内层结构截断。
+        """
+        opens = list(RE_WORK_ITEM.finditer(html))
+        items: list[dict[str, Any]] = []
+
+        for index, match in enumerate(opens):
+            attrs = match.group(0)
+            end = opens[index + 1].start() if index + 1 < len(opens) else len(html)
+            block = html[match.end():end]
+
+            data_match = RE_WORK_DATA.search(attrs)
+            url = _unescape(data_match.group(1)) if data_match else ""
+            if url.startswith("//"):
+                url = "https:" + url
+            course_id = _query_value(url, "courseId")
+            taskref = _query_value(url, "taskrefId")
+
+            title_match = RE_WORK_TITLE.search(block)
+            title = _clean_name(title_match.group(1)) if title_match else ""
+            if not title:
+                continue
+
+            status = ""
+            status_match = RE_WORK_STATUS.search(block)
+            if status_match:
+                status = _strip_tags(status_match.group(1))
+            if not status:
+                status_match = RE_WORK_STATUS_TEXT.search(block)
+                if status_match:
+                    status = status_match.group(1)
+            status = status.strip()
+
+            display_match = RE_WORK_COURSE_DISPLAY.search(block)
+            course_display = _clean_name(display_match.group(1)) if display_match else ""
+            course_display = course_display.rstrip("…. ")
+
+            items.append(
+                {
+                    "id": taskref or url,
+                    "title": title,
+                    "course_id": course_id,
+                    "course_display": course_display,
+                    "status": status,
+                    "url": url,
+                    "remaining_hours": _remaining_hours(block),
+                }
+            )
+        return items
+
+    def _work_detail(self, url: str) -> dict[str, Any]:
+        """读一条作业的详情页，取绝对截止时间与分数；失败就当没读到。"""
+        if not url:
+            return {"due": None, "score": None}
+        # ``get_text`` 已经把 HttpError 吞成空串并写进日志，这里只判断有没有内容。
+        html = self.http.get_text(url, note="作业详情")
+        if not html:
+            return {"due": None, "score": None}
+        return self._parse_work_detail(html)
+
+    @staticmethod
+    def _parse_work_detail(html: str) -> dict[str, Any]:
+        """从详情页解析截止时间与分数。
+
+        结构（2026-10 实测）::
+
+            <h4 aria-hidden="true">截止时间：11-30 10:04</h4>
+            <span aria-label="截止时间11月30日10时04分46秒"></span>
+            ...
+            <p class="Number"> 100 <span>分</span> </p>
+
+        ``截止时间`` 不带年份，年份由 :func:`_align_deadline_year` 结合列表里的
+        剩余时间补齐；这里只做纯解析，方便单测。
+        """
+        due: datetime | None = None
+        due_match = RE_WORK_DUE_TEXT.search(html)
+        if due_match:
+            due = parse_dt(due_match.group(1))
+        if due is None:
+            aria = RE_WORK_DUE_ARIA.search(html)
+            if aria:
+                month, day, hour, minute = (int(g) for g in aria.groups()[:4])
+                due = parse_dt(f"{month}-{day} {hour:02d}:{minute:02d}")
+
+        score: float | None = None
+        score_match = RE_WORK_SCORE.search(html)
+        if score_match:
+            try:
+                score = float(score_match.group(1))
+            except ValueError:
+                score = None
+
+        return {"due": due, "score": score}
+
+    # ------------------------------------------------------------------ #
     # 章节任务点（实验性）
     # ------------------------------------------------------------------ #
 
@@ -712,6 +981,53 @@ class ChaoxingProvider(Provider):
 # --------------------------------------------------------------------------- #
 # 工具
 # --------------------------------------------------------------------------- #
+
+def _query_value(url: str, key: str) -> str:
+    """从 URL 里取一个查询参数（只处理作业列表用到的简单场景）。"""
+    match = re.search(rf"[?&]{re.escape(key)}=([^&#]*)", url or "")
+    return _unescape(match.group(1)) if match else ""
+
+
+def _remaining_hours(text: str) -> float | None:
+    """把「剩余995小时51分钟」换成小时数。解析不到返回 ``None``。"""
+    match = RE_WORK_REMAIN_D.search(text)
+    if match:
+        days = int(match.group(1))
+        hours = int(match.group(2) or 0)
+        return days * 24 + hours
+    match = RE_WORK_REMAIN_HM.search(text)
+    if match:
+        return int(match.group(1)) + int(match.group(2)) / 60.0
+    match = RE_WORK_REMAIN_M.search(text)
+    if match:
+        return int(match.group(1)) / 60.0
+    return None
+
+
+def _align_deadline_year(
+    due: datetime | None, remaining_hours: float | None
+) -> datetime | None:
+    """给「月-日 时:分」形式的截止时间补年份。
+
+    ``parse_dt`` 按当年补年份。跨年时这会错：12 月看到「01-05 23:59」会被补成
+    今年 1 月（已经过去近一年），实际是明年 1 月。列表里的「剩余 X 小时」就是
+    一个靠谱的锚点——在 ``due.year-1/0/+1`` 里挑离 ``now + 剩余`` 最近的那个。
+    """
+    if due is None or remaining_hours is None:
+        return due
+    target = now() + timedelta(hours=remaining_hours)
+    best = due
+    for delta in (-1, 0, 1):
+        try:
+            candidate = due.replace(year=due.year + delta)
+        except ValueError:                      # 2 月 29 日落到平年
+            continue
+        if abs((candidate - target).total_seconds()) < abs(
+            (best - target).total_seconds()
+        ):
+            best = candidate
+    return best
+
 
 def _walk_cards(data: Any):
     """从 knowledge/cards 的 mArg JSON 里挖出所有带 jobid 的任务对象。"""

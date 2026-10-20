@@ -54,6 +54,39 @@ const METHODS: { id: Method; title: string; hint: string }[] = [
 
 const loginablePlatforms = computed(() => catalog.loginable())
 
+/** 中国大学 MOOC 的登录协议和超星完全不同，文案和可用方式都得区分。 */
+const isMooc = computed(() => platform.value === 'icourse163')
+/** 头歌既没有可复用的扫码协议，账号密码登录又要过验证码。 */
+const isEducoder = computed(() => platform.value === 'educoder')
+const qrAppName = computed(() => (isMooc.value ? '中国大学 MOOC' : '学习通'))
+
+/**
+ * 每个平台实际支持的登录方式。没列出的平台就是四条全有。
+ *
+ * - 中国大学 MOOC：没做账号密码（网易 URS 要过验证码/二次验证，扫码更稳）。
+ * - 头歌：登录页是表单 + 验证码，没有可复用的扫码协议，也不能替你输密码；
+ *   只剩「粘贴 Cookie」和「本机浏览器」（含独立窗口登录）两条。
+ */
+const METHODS_BY_PLATFORM: Partial<Record<string, Method[]>> = {
+  icourse163: ['qr', 'cookie', 'browser'],
+  educoder: ['cookie', 'browser'],
+}
+
+const methods = computed(() => {
+  const allowed = METHODS_BY_PLATFORM[platform.value]
+  return allowed ? METHODS.filter((item) => allowed.includes(item.id)) : METHODS
+})
+
+/**
+ * 切平台时把当前方式挪到一个还能用的上。不挪的话，从「中国大学 MOOC」切到
+ * 「头歌」会留在一个已经隐藏的 tab 上，表单还画着扫码的面板。
+ */
+watch(platform, () => {
+  if (!methods.value.some((item) => item.id === method.value)) {
+    method.value = methods.value[0]?.id ?? 'qr'
+  }
+})
+
 /** 正在跑的登录任务。同一时刻只允许一个，界面上也只呈现一个。 */
 const activeTask = computed<TaskView | null>(() => {
   const record = tasks.records.find((r) => r.task.kind.startsWith('login_') && !tasks.isFinished(r.task))
@@ -171,7 +204,7 @@ async function submit(): Promise<void> {
   if (method.value === 'cookie') cookieText.value = ''
 
   if (task && method.value === 'qr') {
-    toast.info('二维码已生成', '用手机上的学习通 App 扫下面的码。')
+    toast.info('二维码已生成', `用手机上的「${qrAppName.value}」App 扫下面的码。`)
   }
 }
 
@@ -226,9 +259,9 @@ defineExpose({ submit })
       <ProgressBar :ratio="activeTask!.progress" size="sm" />
 
       <div v-if="qrDataUrl" class="qr">
-        <img class="qr__img" :src="qrDataUrl" alt="登录二维码：请用手机上的学习通 App 扫描" />
+        <img class="qr__img" :src="qrDataUrl" :alt="`登录二维码：请用手机上的${qrAppName} App 扫描`" />
         <div class="qr__side">
-          <p class="qr__tip">用手机上的「学习通」App 扫这个码。</p>
+          <p class="qr__tip">用手机上的「{{ qrAppName }}」App 扫这个码。</p>
           <p class="qr__tip faint">打开 App → 右上角扫一扫 → 确认登录。</p>
           <p class="qr__timer" :class="{ 'qr__timer--urgent': qrUrgent }">
             <template v-if="qrSecondsLeft > 0">这张码还能用 {{ qrSecondsLeft }} 秒</template>
@@ -280,7 +313,7 @@ defineExpose({ submit })
 
       <div class="tabs" role="tablist" aria-label="登录方式">
         <button
-          v-for="item in METHODS"
+          v-for="item in methods"
           :key="item.id"
           type="button"
           role="tab"
@@ -297,11 +330,12 @@ defineExpose({ submit })
       <!-- 扫码 -->
       <div v-if="method === 'qr'" class="pane">
         <p class="pane__text">
-          点下面的按钮，这里会直接出现一张二维码。用手机上的「学习通」App 扫码并在手机上确认，
+          点下面的按钮，这里会直接出现一张二维码。用手机上的「{{ qrAppName }}」App 扫码并在手机上确认，
           程序就能拿到登录会话。密码完全不经过这个程序。
         </p>
         <ul class="pane__list">
-          <li>手机没装学习通？改用「账号密码」。</li>
+          <li v-if="isMooc">中国大学 MOOC 暂不支持账号密码登录，扫码或粘贴 Cookie 都可以。</li>
+          <li v-else>手机没装学习通？改用「账号密码」。</li>
           <li>扫码后如果手机上弹了二次验证，按手机上的提示走完就行。</li>
         </ul>
       </div>
@@ -392,7 +426,8 @@ defineExpose({ submit })
         <p v-if="!liveMode" class="pane__warn">
           浏览器运行时会独占 Cookie 库，读不出来。用这条路之前，请把
           {{ browser }} <strong>完全退出</strong>（含托盘图标里的后台进程）。
-          不想关浏览器就用「扫码」，或勾上上面那个选项另开独立窗口。
+          <template v-if="isEducoder">不想关浏览器就勾上下面那个选项，另开一个独立窗口登录。</template>
+          <template v-else>不想关浏览器就用「扫码」，或勾上上面那个选项另开独立窗口。</template>
         </p>
         <p v-else class="pane__text">
           会打开一个独立的浏览器配置档，你在里面正常登录，程序从调试端口把会话取走。
@@ -539,7 +574,7 @@ defineExpose({ submit })
 
 @media (min-width: 700px) {
   .tabs {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr));
   }
 }
 

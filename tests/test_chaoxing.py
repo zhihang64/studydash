@@ -9,12 +9,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from studydash.providers import AccountConfig, HttpSettings
-from studydash.providers.chaoxing import ChaoxingProvider
+from studydash.providers import chaoxing as chaoxing_mod
+from studydash.providers.chaoxing import (
+    ChaoxingProvider,
+    _align_deadline_year,
+    _remaining_hours,
+)
 
 FIXTURE = Path(__file__).parent / "fixture_course_list.html"
 
@@ -77,16 +83,16 @@ def provider() -> ChaoxingProvider:
 def test_meta_status_matches_what_is_actually_supported(provider):
     """status 跟着「已验证的能力」走，不能跟着心情走。
 
-    这个断言不写死某个取值：超星的进度已经用真实账号跑通过，作业/待办还没接入，
-    所以稳定档必须带验证日期，而 note 里必须把那块没做的讲出来——
-    「待办 0」最容易被用户读成「没有作业」。
+    这个断言不写死某个取值：超星的课程、进度、作业/待办都已用真实账号跑通过，
+    所以 stable 必须带验证日期，note 里也要把作业能力写出来——
+    否则用户仍会把「待办 0」读成「没有作业」。
     """
     meta = provider.meta
     assert meta.id == "chaoxing"
     assert meta.auth == "cookie"
     if meta.status == "stable":
         assert meta.verified, "标成 stable 就必须写上验证日期"
-    assert "作业" in meta.note, "作业/待办尚未接入，note 必须讲清楚"
+    assert "作业" in meta.note, "作业/待办已接入，note 必须讲清楚"
 
 
 def test_client_declares_no_post_endpoints(provider):
@@ -196,6 +202,7 @@ def test_probe_plan_starts_from_course_list(provider):
     """
     urls = [url for _, url in provider.probe_plan()]
     assert any("courses/list" in u for u in urls)
+    assert any("work/stu-work" in u for u in urls)
     assert not any("base/settings" in u for u in urls)
 
 
@@ -345,3 +352,270 @@ def test_fill_progress_respects_the_cap(provider):
 
     assert calls == ["0", "1"]
     assert courses[2].progress == []
+
+
+# --------------------------------------------------------------------------- #
+# 作业 / 待办
+# --------------------------------------------------------------------------- #
+#
+# 夹具必须**同时**覆盖两种真实结构（和课程页的教训一样）：
+#
+# * 未提交项：``<span class="status">未提交</span>`` + 「剩余 X 小时」；
+# * 已完成 / 待批阅：没有 ``class="status"``，状态直接写在
+#   ``<span aria-hidden="true">`` 里，而且**没有**剩余时间。
+#
+# 课程名在列表页被截断成「大数据统计分...」，解析必须靠 courseId 回查，
+# 不能把这段显示文本当成课名。
+
+WORK_LIST = """
+<html><body>
+<ul class="nav">
+  <li onclick="goTask(this);" data="https://mooc1.chaoxing.com/mooc-ans/android/mtaskmsgspecial?taskrefId=100&amp;msgId=0&amp;courseId=111&amp;userId=9&amp;clazzId=222&amp;type=work&amp;enc_task=aaa">
+    <span class="spanImg"><i class="redPoint"></i></span>
+    <div role="option">
+      <p aria-hidden="true">第5章 参数估计</p>
+      <span class="status" aria-hidden="true">未提交</span>
+      <span aria-hidden="true">《大数据统计分...》</span>
+      <span class="fr" aria-hidden="true">剩余995小时51分钟</span>
+      <span aria-label="作业名称第5章 参数估计作业状态未提交"></span>
+    </div>
+  </li>
+  <li onclick="goTask(this);" data="https://mooc1.chaoxing.com/mooc-ans/android/mtaskmsgspecial?taskrefId=101&amp;msgId=0&amp;courseId=111&amp;userId=9&amp;clazzId=222&amp;type=work&amp;enc_task=bbb">
+    <span class="spanImg"><img src="task-work-gray.png"></span>
+    <div role="option">
+      <p aria-hidden="true">第1章 导论</p>
+      <span  aria-hidden="true">已完成</span>
+      <span aria-hidden="true">《大数据统计分...》</span>
+    </div>
+  </li>
+  <li onclick="goTask(this);" data="https://mooc1.chaoxing.com/mooc-ans/android/mtaskmsgspecial?taskrefId=102&amp;msgId=0&amp;courseId=333&amp;userId=9&amp;clazzId=444&amp;type=work&amp;enc_task=ccc">
+    <span class="spanImg"><img src="task-work.png"></span>
+    <div role="option">
+      <p aria-hidden="true">实验1_初识算法与AI协作</p>
+      <span  aria-hidden="true">待批阅</span>
+      <span aria-hidden="true">《算法设计与分...》</span>
+    </div>
+  </li>
+</ul>
+</body></html>
+"""
+
+PENDING_DETAIL = """
+<html><body>
+<div class="zwork">
+  <div class="tmTimeNew">
+    <h3 role="none">第5章 参数估计</h3>
+    <span role="option">
+      <span aria-label="开始时间09月29日10时04分29秒"></span>
+      <h4 aria-hidden="true">开始时间：09-29 10:04</h4>
+    </span>
+    <span role="option">
+      <span aria-label="截止时间11月30日10时04分46秒"></span>
+      <h4 aria-hidden="true">截止时间：11-30 10:04</h4>
+    </span>
+  </div>
+  <div class="zwork_info"><p>共包含10道题目。</p></div>
+</div>
+</body></html>
+"""
+
+COMPLETED_DETAIL = """
+<html><body>
+<div class="wid750 padTop250">
+  <p class="Number"> 100 <span>分</span> </p>
+  <div class="BtmCon"><p>共10题，客观题10道，主观题0道</p></div>
+</div>
+</body></html>
+"""
+
+
+def test_parse_work_list_mixed_structures(provider):
+    items = provider._parse_work_list(WORK_LIST)
+    assert [i["status"] for i in items] == ["未提交", "已完成", "待批阅"]
+    assert [i["title"] for i in items] == [
+        "第5章 参数估计",
+        "第1章 导论",
+        "实验1_初识算法与AI协作",
+    ]
+    assert [i["course_id"] for i in items] == ["111", "111", "333"]
+    assert [i["id"] for i in items] == ["100", "101", "102"]
+    # 只有未提交项有剩余时间
+    assert items[0]["remaining_hours"] == pytest.approx(995 + 51 / 60)
+    assert items[1]["remaining_hours"] is None
+    assert items[2]["remaining_hours"] is None
+    assert all(i["url"].startswith("https://mooc1.chaoxing.com/") for i in items)
+
+
+def test_parse_work_list_empty(provider):
+    assert provider._parse_work_list("<html><body>没有作业</body></html>") == []
+
+
+def test_parse_work_detail_reads_absolute_deadline(provider):
+    info = provider._parse_work_detail(PENDING_DETAIL)
+    due = info["due"]
+    assert due is not None
+    assert (due.month, due.day, due.hour, due.minute) == (11, 30, 10, 4)
+    assert info["score"] is None
+
+
+def test_parse_work_detail_falls_back_to_aria_label(provider):
+    """有的版本只留 aria-label，没有可见的 ``<h4>``。"""
+    html = '<span aria-label="截止时间01月05日23时59分07秒"></span>'
+    due = provider._parse_work_detail(html)["due"]
+    assert due is not None
+    assert (due.month, due.day, due.hour, due.minute) == (1, 5, 23, 59)
+
+
+def test_parse_work_detail_reads_score(provider):
+    info = provider._parse_work_detail(COMPLETED_DETAIL)
+    assert info["score"] == 100.0
+    assert info["due"] is None
+
+
+def test_remaining_hours_variants():
+    assert _remaining_hours("剩余995小时51分钟") == pytest.approx(995 + 51 / 60)
+    assert _remaining_hours("剩余45分钟") == pytest.approx(0.75)
+    assert _remaining_hours("剩余1天2小时") == pytest.approx(26)
+    assert _remaining_hours("已完成") is None
+
+
+def test_align_deadline_year_handles_new_year(monkeypatch):
+    """12 月看到「01-05」时不能补成今年（已经过去快一年）。"""
+    fixed = datetime(2026, 12, 20, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(chaoxing_mod, "now", lambda: fixed)
+    target = datetime(2027, 1, 5, 23, 59, tzinfo=timezone.utc)
+    remaining = (target - fixed).total_seconds() / 3600
+    out = _align_deadline_year(datetime(2026, 1, 5, 23, 59, tzinfo=timezone.utc), remaining)
+    assert out == target
+
+
+def test_align_deadline_year_keeps_same_year_without_hint(monkeypatch):
+    due = datetime(2026, 1, 5, 23, 59, tzinfo=timezone.utc)
+    assert _align_deadline_year(due, None) is due
+
+
+def test_fill_works_attaches_only_to_known_courses(provider, monkeypatch):
+    """课程名按 courseId 回查；不在课程列表里的课程不造假卡片。"""
+    from studydash.model import Course, now as model_now
+
+    detail_calls: list[str] = []
+
+    def fake_get_text(url, *args, **kwargs):
+        if "work/stu-work" in url:
+            return WORK_LIST
+        if "taskrefId=100" in url:
+            detail_calls.append(url)
+            return PENDING_DETAIL
+        if "taskrefId=101" in url:
+            detail_calls.append(url)
+            return COMPLETED_DETAIL
+        return ""
+
+    monkeypatch.setattr(provider.http, "get_text", fake_get_text)
+    c1 = Course(id="111", name="大数据统计分析基础", platform="chaoxing")
+    c3 = Course(id="999", name="别的课", platform="chaoxing")   # 333 不在课程列表里
+
+    provider._fill_works([c1, c3])
+
+    assert len(c1.assignments) == 2
+    assert c3.assignments == []
+    pending = next(a for a in c1.assignments if a.id == "100")
+    assert pending.title == "第5章 参数估计"
+    assert pending.course == "大数据统计分析基础"
+    assert pending.status == "pending"
+    assert pending.due is not None
+    # 详情页的绝对截止时间原样落下来（夹具里是 11-30 10:04）。
+    # 不要拿「剩余 995h51m」反推精确到分钟的时刻：夹具里的剩余时间是写死的历史值，
+    # 和跑测试的当下必然有偏差，只会让用例在一天里的不同时刻随机红。
+    assert (pending.due.month, pending.due.day, pending.due.hour, pending.due.minute) == (
+        11, 30, 10, 4,
+    )
+    assert pending.due > model_now(), "年份没对齐，截止时间落到了过去"
+
+    done = next(a for a in c1.assignments if a.id == "101")
+    assert done.status == "submitted"
+    assert done.finished
+    assert done.due is None
+
+    # 已完成项不该再发详情请求；只有未提交的 100 发了一次
+    assert len(detail_calls) == 1 and "taskrefId=100" in detail_calls[0]
+
+
+def test_fill_works_keeps_pending_review_label(provider, monkeypatch):
+    """「待批阅」也归 done，但卡片上要留一句，别让用户以为已经批完。"""
+    from studydash.model import Course
+
+    def fake_get_text(url, *args, **kwargs):
+        return WORK_LIST if "work/stu-work" in url else ""
+
+    monkeypatch.setattr(provider.http, "get_text", fake_get_text)
+    course = Course(id="333", name="算法设计与分析", platform="chaoxing")
+    provider._fill_works([course])
+
+    assert len(course.assignments) == 1
+    item = course.assignments[0]
+    assert item.status == "submitted"
+    assert item.finished
+    assert item.detail == "待批阅"
+
+
+def test_fill_works_respects_detail_cap(provider, monkeypatch):
+    """详情请求有上限，超出的未提交项退回「剩余时间」估算，不编截止时间。"""
+    from studydash.model import Course, now as model_now
+
+    provider.account.options["max_work_details"] = 0
+    detail_calls: list[str] = []
+
+    def fake_get_text(url, *args, **kwargs):
+        if "work/stu-work" in url:
+            return WORK_LIST
+        detail_calls.append(url)
+        return PENDING_DETAIL
+
+    monkeypatch.setattr(provider.http, "get_text", fake_get_text)
+    course = Course(id="111", name="大数据统计分析基础", platform="chaoxing")
+    provider._fill_works([course])
+
+    assert detail_calls == []
+    pending = next(a for a in course.assignments if a.id == "100")
+    assert pending.due is not None
+    expected = model_now() + timedelta(hours=995 + 51 / 60)
+    assert abs((pending.due - expected).total_seconds()) < 120
+
+
+def test_fill_works_warns_when_page_structure_changes(provider, monkeypatch):
+    """拿不到条目时必须说「可能改版了」，而不是安静地当作没有作业。"""
+    from io import StringIO
+
+    from studydash.log import Log
+
+    stream = StringIO()
+    provider.log = Log(stream=stream)
+    monkeypatch.setattr(provider.http, "get_text", lambda *a, **k: "<html><body>改版</body></html>")
+
+    provider._fill_works([])
+
+    assert "无法识别" in stream.getvalue()
+
+
+def test_fetch_skips_works_when_disabled(provider, monkeypatch):
+    monkeypatch.setattr(provider.http, "get_text", lambda *a, **k: MINIMAL_LIST)
+    provider.account.options["works"] = False
+    provider._fill_progress = lambda courses: None
+    calls: list[list] = []
+    provider._fill_works = lambda courses: calls.append(courses)
+
+    provider.fetch()
+
+    assert calls == []
+
+
+def test_fetch_fills_works_by_default(provider, monkeypatch):
+    monkeypatch.setattr(provider.http, "get_text", lambda *a, **k: MINIMAL_LIST)
+    provider._fill_progress = lambda courses: None
+    calls: list[list] = []
+    provider._fill_works = lambda courses: calls.append(courses)
+
+    provider.fetch()
+
+    assert len(calls) == 1

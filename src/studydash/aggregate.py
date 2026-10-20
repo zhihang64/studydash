@@ -282,6 +282,10 @@ def _sort_courses(courses: list[Course]) -> list[Course]:
 
 def _course_card(course: Course, ref: datetime) -> dict[str, Any]:
     data = course.to_dict(ref=ref)
+    # ``key`` 是「隐藏课程」用的稳定标识。同一门课的 courseId 在每个学期都一样，
+    # 只拿 platform+id 会把「高数（上学期）」和「高数（这学期）」一起藏掉。
+    data["key"] = course_key(course)
+    data["term_id"] = str(course.extra.get("term_id") or "")
     # ``Course.ratio`` 在「没有任何进度和作业」时退化成 0.0，但那门课并不是「进度 0%」，
     # 而是「适配器没取到数据」。两者在界面上必须能分开，否则用户会以为自己一节课没上。
     # overview.avg_progress 早就把这类课排除在外了（见上面的 ratios），这里补上卡片侧。
@@ -365,6 +369,144 @@ def _dedupe(items: Iterable[str]) -> list[str]:
             seen.add(item)
             out.append(item)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 隐藏课程
+# --------------------------------------------------------------------------- #
+
+#: 「还没做完」的状态集合，与 build_payload 里算 pending 的口径保持一致。
+PENDING_STATES = frozenset({"overdue", "urgent", "soon", "later", "none"})
+
+
+def course_key(course: Course | Mapping[str, Any]) -> str:
+    """课程的唯一标识：``平台:课程id:学期id``。
+
+    为什么不只用 ``平台:课程id``：同一门课可以修好几个学期（真实账号上
+    「高等数学」就有三个学期），只按 courseId 隐藏会把其他学期一起藏掉。
+    """
+    if isinstance(course, Mapping):
+        given = str(course.get("key") or "")
+        if given:
+            return given
+        platform = str(course.get("platform") or "")
+        cid = str(course.get("id") or "")
+        term = str(course.get("term_id") or "")
+    else:
+        platform = course.platform
+        cid = course.id
+        term = str(course.extra.get("term_id") or "")
+    return f"{platform}:{cid}:{term}"
+
+
+def filter_payload(payload: Mapping[str, Any], hidden: Iterable[str]) -> dict[str, Any]:
+    """把被动过手脚的课程从看板里摘出去，返回一份新的 payload。
+
+    隐藏只是「不想在总览里看到它」，**不删除任何数据**：``progress.json``
+    里始终是完整的一份，取消隐藏不用重新抓取。所以过滤放在读取这一层，
+    而不是抓取时就把课扔掉。
+
+    摘出去的不只是课程卡：时间线、总览数字、平台卡都要跟着重算，否则会
+    出现「课程 10 门，平均进度却是 12 门的」这种自相矛盾的数字。
+    """
+    keys = {str(k) for k in hidden if str(k)}
+    # 旧版 progress.json 里的课程卡没有 key / term_id：读的时候补齐，
+    # 否则升级之后第一次隐藏会拿到一个前端根本不认识的键。
+    courses = [_with_key(c) for c in payload.get("courses") or [] if isinstance(c, Mapping)]
+    timeline = [a for a in payload.get("timeline") or [] if isinstance(a, Mapping)]
+
+    visible = [c for c in courses if course_key(c) not in keys]
+    hidden_cards = [c for c in courses if course_key(c) in keys]
+
+    # 作业按 uid 摘：课程卡里就带着自己的作业，不用再猜 assignment 属于哪个学期。
+    hidden_uids = {
+        str(a.get("uid"))
+        for card in hidden_cards
+        for a in card.get("assignments") or []
+        if isinstance(a, Mapping) and a.get("uid")
+    }
+    hidden_pairs = {
+        (str(c.get("platform") or ""), str(c.get("id") or "")) for c in hidden_cards
+    }
+    visible_timeline = [
+        a
+        for a in timeline
+        if str(a.get("uid")) not in hidden_uids
+        and (str(a.get("platform") or ""), str(a.get("course_id") or "")) not in hidden_pairs
+    ]
+
+    out = dict(payload)
+    out["courses"] = visible
+    out["timeline"] = visible_timeline
+    out["overview"] = _recount_overview(payload.get("overview") or {}, visible, visible_timeline)
+    out["platforms"] = _recount_platforms(payload.get("platforms") or [], visible)
+    out["hidden"] = [_strip_assignments(c) for c in hidden_cards]
+
+    meta = dict(payload.get("meta") or {})
+    meta["hidden_count"] = len(hidden_cards)
+    out["meta"] = meta
+    return out
+
+
+def _recount_overview(
+    old: Mapping[str, Any], courses: list[Mapping[str, Any]], timeline: list[Mapping[str, Any]]
+) -> dict[str, Any]:
+    ratios = [c.get("progress") for c in courses if c.get("has_data")]
+    ratios = [float(r) for r in ratios if isinstance(r, (int, float))]
+    return {
+        **old,
+        "courses": len(courses),
+        "platforms": len({str(c.get("platform") or "") for c in courses}),
+        "avg_progress": round(sum(ratios) / len(ratios), 4) if ratios else 0.0,
+        # 一门可测量的课都没有时，0.0 是「没得平均」，不是「平均 0%」
+        "has_progress": bool(ratios),
+        "pending": sum(1 for a in timeline if a.get("state") in PENDING_STATES),
+        "overdue": sum(1 for a in timeline if a.get("state") == "overdue"),
+        "due_soon": sum(1 for a in timeline if a.get("state") == "urgent"),
+        "done": sum(1 for a in timeline if a.get("state") == "done"),
+    }
+
+
+def _recount_platforms(
+    cards: Iterable[Mapping[str, Any]], courses: list[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for course in courses:
+        grouped.setdefault(str(course.get("platform") or ""), []).append(course)
+
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        platform = str(card.get("id") or "")
+        items = grouped.get(platform, [])
+        # 抓取失败的平台即使一门可见课都没有也要留着——「它挂了」本身是信息。
+        if not items and card.get("ok", True):
+            continue
+        ratios = [c.get("progress") for c in items if c.get("has_data")]
+        ratios = [float(r) for r in ratios if isinstance(r, (int, float))]
+        assignments = [a for c in items for a in c.get("assignments") or [] if isinstance(a, Mapping)]
+        out.append(
+            {
+                **card,
+                "courses": len(items),
+                "avg_progress": round(sum(ratios) / len(ratios), 4) if ratios else 0.0,
+                "has_data": bool(ratios),
+                "pending": sum(1 for a in assignments if a.get("state") in PENDING_STATES),
+                "overdue": sum(1 for a in assignments if a.get("state") == "overdue"),
+            }
+        )
+    return out
+
+
+def _strip_assignments(card: Mapping[str, Any]) -> dict[str, Any]:
+    """隐藏页只需要「是哪门课、还欠多少」，作业明细留在完整 payload 里。"""
+    return {k: v for k, v in card.items() if k != "assignments"}
+
+
+def _with_key(card: Mapping[str, Any]) -> dict[str, Any]:
+    key = course_key(card)
+    if card.get("key") == key and "term_id" in card:
+        return dict(card)
+    return {**card, "key": key, "term_id": str(card.get("term_id") or "")}
 
 
 # --------------------------------------------------------------------------- #

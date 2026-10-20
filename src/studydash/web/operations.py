@@ -15,6 +15,7 @@ import time
 from datetime import timedelta
 from typing import Any, Callable, Mapping
 
+from .. import mooclogin
 from ..aggregate import aggregate, build_payload
 from ..http import HttpTrace
 from ..log import Log
@@ -76,8 +77,86 @@ def _as_text(value: Any, default: str = "") -> str:
     return str(value).strip() if value is not None else default
 
 
+def _require_login_support(platform: str) -> None:
+    """拒绝没有登录实现的平台，别拿超星的协议冒充它。
+
+    这是一个真实踩过的坑：网页版以前对任何平台都调用超星的扫码 / 密码登录，
+    于是选「中国大学 MOOC」弹出来的是学习通的码，用户拿 MOOC App 怎么都扫不上。
+    平台的 ``meta.login`` 现在是显式声明，没有声明就老实拒绝。
+    """
+    meta = next((item for item in metas() if item.id == platform), None)
+    if meta is None:
+        raise ApiError("invalid_request", f"没有这个平台：{platform}")
+    if meta.login:
+        return
+    raise ApiError(
+        "invalid_request",
+        f"{meta.name} 还没有网页登录支持",
+        hint=(
+            "先在它的网页里登录，再用「粘贴 Cookie」（取消勾选验证）导入；"
+            "命令行也可以用 `studydash login --platform "
+            f"{platform} --source manual --cookie \"…\" --no-check`。"
+        ),
+    )
+
+
 def _png_data_url(png: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+#: 哪些平台没有哪种登录方式，以及为什么、该改用什么。
+#:
+#: 不写这张表的话，``login_qr`` 会拿超星的扫码协议去问别的平台（选「中国大学
+#: MOOC」弹出学习通的码，就是这个问题），而 ``login_password`` 会拿超星表单去
+#: 登头歌，报出来的错和「密码错了」一模一样。宁可直说不支持。
+_UNSUPPORTED_LOGIN: dict[tuple[str, str], tuple[str, str]] = {
+    ("icourse163", "login_password"): (
+        "中国大学 MOOC 还不支持账号密码登录",
+        "改用「扫码」（中国大学 MOOC App 扫）或「粘贴 Cookie」。",
+    ),
+    ("educoder", "login_qr"): (
+        "头歌没有可复用的扫码登录协议",
+        "改用「打开浏览器登录」（独立窗口，登录完自动取会话）或「粘贴 Cookie」。",
+    ),
+    ("educoder", "login_password"): (
+        "头歌的账号密码登录要过验证码，程序没法替你完成",
+        "改用「打开浏览器登录」或「粘贴 Cookie」。",
+    ),
+}
+
+
+def _reject_login_method(platform: str, kind: str) -> None:
+    found = _UNSUPPORTED_LOGIN.get((platform, kind))
+    if found:
+        raise ApiError("invalid_request", found[0], hint=found[1])
+
+
+def _login_module(platform: str):
+    """拿到这个平台的登录模块（``check`` / ``from_browser`` / ``from_live``）。
+
+    三个模块的函数名和签名刻意保持一致，所以这里可以直接按模块分派，不用给
+    每个平台写一遍 if。超星在 :mod:`studydash.login`，中国大学 MOOC 在
+    :mod:`studydash.mooclogin`，头歌在 :mod:`studydash.educoder_login`。
+    """
+    if platform == "icourse163":
+        return mooclogin
+    if platform == "educoder":
+        from .. import educoder_login
+
+        return educoder_login
+    from .. import login
+
+    return login
+
+
+def _platform_name(platform: str) -> str:
+    discover()
+    meta = next((item for item in metas() if item.id == platform), None)
+    return meta.name if meta else platform
+
+
+def _login_home(platform: str) -> str:
+    return getattr(_login_module(platform), "LOGIN_HOME", "https://i.chaoxing.com/base")
 
 
 def _task_log(rep: Reporter) -> Log:
@@ -167,13 +246,18 @@ def op_login_qr(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> d
     timeout = _as_float(options.get("timeout"), 240.0)
     platform = _as_text(options.get("platform"), "chaoxing") or "chaoxing"
     label = _as_text(options.get("label"))
+    _require_login_support(platform)
+    _reject_login_method(platform, "login_qr")
     started = time.monotonic()
+    is_mooc = platform == "icourse163"
+    app_name = "中国大学 MOOC" if is_mooc else "学习通"
+    refresh = mooclogin.REFRESH_SECONDS if is_mooc else REFRESH_SECONDS
 
     def on_code(ticket) -> None:
         # 二维码原地更新：码有两分钟有效期，过期就换一张，前端据此重画同一张卡片。
         rep.artifact("qr_data_url", _png_data_url(ticket.png))
-        rep.artifact("qr_expires_at", iso(now() + timedelta(seconds=REFRESH_SECONDS)))
-        rep.progress(0.05, "二维码已就绪，用学习通 App 扫它")
+        rep.artifact("qr_expires_at", iso(now() + timedelta(seconds=refresh)))
+        rep.progress(0.05, f"二维码已就绪，用{app_name} App 扫它")
 
     def on_tick(payload: dict[str, Any]) -> None:
         mes = _as_text(payload.get("mes"))
@@ -182,8 +266,14 @@ def op_login_qr(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> d
         span = time.monotonic() - started
         rep.progress(min(0.9, 0.05 + 0.85 * span / max(timeout, 1.0)))
 
-    rep.progress(0.0, "正在向超星要一张登录二维码")
-    session = qr_login(timeout=timeout, log=_task_log(rep), on_code=on_code, on_tick=on_tick)
+    if is_mooc:
+        rep.progress(0.0, "正在向中国大学 MOOC 要一张登录二维码")
+        session = mooclogin.login(
+            timeout=timeout, log=_task_log(rep), on_code=on_code, on_tick=on_tick
+        )
+    else:
+        rep.progress(0.0, "正在向超星要一张登录二维码")
+        session = qr_login(timeout=timeout, log=_task_log(rep), on_code=on_code, on_tick=on_tick)
     return _after_login(
         state, rep, session, platform=platform, label=label, strict=False,
     )
@@ -203,6 +293,8 @@ def op_login_password(state: AppState, rep: Reporter, options: Mapping[str, Any]
         raise ApiError("invalid_request", "没有填密码", detail={"field": "password"})
     platform = _as_text(options.get("platform"), "chaoxing") or "chaoxing"
     label = _as_text(options.get("label"))
+    _require_login_support(platform)
+    _reject_login_method(platform, "login_password")
     rep.progress(0.1, "正在读取超星登录页的表单参数")
     session = password_login(username, password, timeout=15.0, log=_task_log(rep))
     result = _after_login(
@@ -213,7 +305,7 @@ def op_login_password(state: AppState, rep: Reporter, options: Mapping[str, Any]
 
 
 def op_login_cookie(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict[str, Any]:
-    from ..login import check, cookie_count, normalize_cookie, uid_from_cookie
+    from ..login import cookie_count, normalize_cookie, uid_from_cookie
 
     raw = _as_text(options.get("cookie"))
     if not raw:
@@ -227,20 +319,25 @@ def op_login_cookie(state: AppState, rep: Reporter, options: Mapping[str, Any]) 
     if not cookie:
         raise ApiError("invalid_request", "这段文本里没解析出任何 Cookie", detail={"field": "cookie"})
 
+    module = _login_module(platform)
     if verify:
+        _require_login_support(platform)
         rep.progress(0.4, "验证这个 Cookie 还能不能用")
-        session = check(cookie, timeout=10.0, log=_task_log(rep))
+        session = module.check(cookie, timeout=10.0, log=_task_log(rep))
         if not session.ok:
             raise ApiError(
                 "auth_error",
                 session.message or "这个 Cookie 不管用",
-                hint="确认复制的是超星已登录状态下的完整 Cookie 请求头。",
+                hint=(
+                    f"确认复制的是{_platform_name(platform)}已登录状态下的完整 Cookie 请求头。"
+                ),
             )
     else:
         session = Session(
             cookie=cookie,
             source="manual",
-            uid=uid_from_cookie(cookie),
+            # 超星的 uid 就写在 Cookie 里；其他平台得问了才知道，跳过自检时留空。
+            uid=uid_from_cookie(cookie) if platform == "chaoxing" else "",
             cookie_count=cookie_count(cookie),
             message="未验证",
         )
@@ -248,35 +345,35 @@ def op_login_cookie(state: AppState, rep: Reporter, options: Mapping[str, Any]) 
 
 
 def op_login_browser(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict[str, Any]:
-    from ..login import check, from_browser
-
     browser = _as_text(options.get("browser"), "edge") or "edge"
     profile = _as_text(options.get("profile"))
     platform = _as_text(options.get("platform"), "chaoxing") or "chaoxing"
     label = _as_text(options.get("label"))
+    _require_login_support(platform)
+    module = _login_module(platform)
 
     rep.progress(0.15, f"读取 {browser} 的 Cookie 库")
-    cookie = from_browser(browser, profile=profile)
+    cookie = module.from_browser(browser, profile=profile)
     rep.progress(0.5, "验证会话")
-    session = check(cookie, timeout=10.0, log=_task_log(rep))
+    session = module.check(cookie, timeout=10.0, log=_task_log(rep))
     if not session.ok:
         raise ApiError("auth_error", session.message or "读到的会话不管用")
     return _after_login(state, rep, session, platform=platform, label=label)
 
 
 def op_login_live(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict[str, Any]:
-    from ..login import check, from_live
-
     browser = _as_text(options.get("browser"), "edge") or "edge"
     timeout = _as_float(options.get("timeout"), 300.0)
     platform = _as_text(options.get("platform"), "chaoxing") or "chaoxing"
     label = _as_text(options.get("label"))
+    _require_login_support(platform)
+    module = _login_module(platform)
 
     rep.progress(0.05, f"正在用 {browser} 打开登录页（独立配置档）")
-    rep.artifact("browser_url", "https://i.chaoxing.com/base")
-    cookie = from_live(browser=browser, timeout=timeout, log=_task_log(rep))
+    rep.artifact("browser_url", _login_home(platform))
+    cookie = module.from_live(browser=browser, timeout=timeout, log=_task_log(rep))
     rep.progress(0.8, "已取到会话，验证一下")
-    session = check(cookie, timeout=10.0, log=_task_log(rep))
+    session = module.check(cookie, timeout=10.0, log=_task_log(rep))
     if not session.ok:
         raise ApiError("auth_error", session.message or "取到的会话不管用")
     return _after_login(state, rep, session, platform=platform, label=label)

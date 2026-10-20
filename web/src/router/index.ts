@@ -46,6 +46,13 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '课程' },
   },
   {
+    // 二级页面：从「课程」页进，不占主导航的位置
+    path: '/hidden',
+    name: 'hidden',
+    component: () => import('@/views/HiddenView.vue'),
+    meta: { title: '已隐藏课程' },
+  },
+  {
     path: '/accounts',
     name: 'accounts',
     component: () => import('@/views/AccountsView.vue'),

@@ -95,8 +95,8 @@ X-Studydash-Token: <token>
 
 | `kind` | `options` | 说明 |
 | --- | --- | --- |
-| `login_qr` | `timeout`（秒，默认 240） | 出二维码，等手机扫码 |
-| `login_password` | `username`, `password`, `platform`, `label` | 账号密码登录。**密码不落盘、不进日志、不出现在任务快照里** |
+| `login_qr` | `platform`, `timeout`（秒，默认 240） | 出该平台自己的二维码（超星 / 中国大学 MOOC 是两套协议），等手机扫码。头歌没有可复用的扫码协议 → `invalid_request` |
+| `login_password` | `username`, `password`, `platform`, `label` | 账号密码登录（目前只有超星）。**密码不落盘、不进日志、不出现在任务快照里**。中国大学 MOOC 与头歌不支持 → `invalid_request` |
 | `login_cookie` | `cookie`, `platform`, `label`, `verify`（默认 true） | 手动粘贴 Cookie |
 | `login_browser` | `browser`, `profile`, `platform`, `label` | 读本机浏览器配置档（要求该浏览器已完全退出） |
 | `login_live` | `browser`, `timeout`, `platform`, `label` | 起一个隔离配置档的浏览器窗口 |
@@ -188,7 +188,8 @@ data: {"id":"t_9f3c1a","state":"done","result":{...}}
 | `PATCH` | `/api/settings` | 局部更新上面 `http` / `ui` 的字段，返回更新后的同构对象 |
 
 `ProviderMeta` 字段：`id`、`name`、`short`、`status`（`stable`/`beta`/`unverified`/`broken`）、
-`status_label`、`color`、`auth`、`homepage`、`verified`、`note`。
+`status_label`、`color`、`auth`、`login`（后端是否实现了该平台的登录流程；`false` 时前端
+不应把它放进登录平台下拉框）、`homepage`、`verified`、`note`。
 
 ## 5. 账号
 
@@ -205,12 +206,31 @@ data: {"id":"t_9f3c1a","state":"done","result":{...}}
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/payload` | 最近一次抓取的前端契约全文；没有则 `404 not_found` |
+| `GET` | `/api/payload` | 最近一次抓取的前端契约全文；没有则 `404 not_found`。**已排除隐藏课程** |
 | `POST` | `/api/payload/demo` | 用内置演示数据生成一份 payload 并落盘，返回 `{ "summary": {...} }` |
-| `GET` | `/api/payload/meta` | `{ "generated_at", "mode", "warnings", "overview" }`（轻量，用于首屏） |
+| `GET` | `/api/payload/meta` | `{ "generated_at", "mode", "warnings", "overview", "hidden_count" }`（轻量，用于首屏） |
 
 `payload` 的结构见 `docs/payload.example.json`（`meta` / `overview` / `platforms` /
-`timeline` / `courses` / `accounts` 六个顶层键）。后端写入的是同一份契约，前端直接渲染。
+`timeline` / `courses` / `hidden` / `accounts` 七个顶层键）。后端写入的是同一份契约，
+前端直接渲染。
+
+### 6.1 隐藏课程
+
+「结课了」或「这学期不想再看到」的课程可以从视图里摘掉。隐藏只影响**读取**：
+`data/progress.json` 始终是完整的一份，所以取消隐藏不需要重新抓取。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/hidden` | `{ "hidden": [课程卡...], "count": 1 }` |
+| `POST` | `/api/hidden` | body `{ "key": "平台:课程id:学期id" }`，返回同上。未知 key → `404 not_found`；重复隐藏幂等 |
+| `DELETE` | `/api/hidden/{key}` | 取消隐藏，返回同上。key 需 URL 编码；没藏过也返回 `200`（幂等） |
+
+课程键由后端生成，课程卡上带 `key` 字段（`平台:课程id:学期id`）。第三段是学期，
+所以同一门课的不同学期互不影响——只按 `platform + id` 隐藏会把高数上学期一起藏掉。
+
+`GET /api/payload` 返回的 `courses` / `timeline` / `overview` / `platforms` 都已排除
+隐藏课程；被隐藏的课程卡放在 `hidden` 数组里（不带作业明细），`meta.hidden_count`
+是数量。隐藏列表存在 `config.json` 的 `ui.hidden_courses`。
 
 ---
 

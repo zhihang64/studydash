@@ -221,6 +221,36 @@ class Config:
         theme = str(self.ui.get("theme") or "auto").lower()
         return theme if theme in {"auto", "light", "dark"} else "auto"
 
+    # -- 隐藏课程 ---------------------------------------------------------- #
+
+    def hidden_courses(self) -> list[str]:
+        """被隐藏的课程键（``平台:课程id:学期id``）。
+
+        放在 ``ui`` 里而不是账号下：隐藏是「我不想在总览里看到它」，和用哪个
+        账号抓的没关系；同一门课换账号重抓之后也仍然该是隐藏的。
+        """
+        raw = self.ui.get("hidden_courses")
+        if not isinstance(raw, (list, tuple)):
+            return []
+        out: list[str] = []
+        for item in raw:
+            key = str(item or "").strip()
+            if key and key not in out:
+                out.append(key)
+        return out
+
+    def set_hidden_courses(self, keys: Iterable[str]) -> None:
+        """覆盖式写入。空列表就把这个键删掉，别在配置文件里留个空数组。"""
+        cleaned: list[str] = []
+        for item in keys:
+            key = str(item or "").strip()
+            if key and key not in cleaned:
+                cleaned.append(key)
+        if cleaned:
+            self.ui["hidden_courses"] = cleaned
+        else:
+            self.ui.pop("hidden_courses", None)
+
 
 # --------------------------------------------------------------------------- #
 # JSON 读写

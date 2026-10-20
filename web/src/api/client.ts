@@ -20,6 +20,7 @@ import type {
   PayloadMetaView,
   PayloadView,
   PlatformMeta,
+  HiddenCoursesReply,
   SettingsPatch,
   SettingsView,
   TaskKind,
@@ -219,6 +220,12 @@ export const api = {
   payload: () => request<PayloadView>('/payload'),
   payloadMeta: () => request<PayloadMetaView>('/payload/meta'),
   demo: () => request<DemoSelfSummary>('/payload/demo', { method: 'POST' }),
+
+  hidden: () => request<HiddenCoursesReply>('/hidden'),
+  hideCourse: (key: string) =>
+    request<HiddenCoursesReply>('/hidden', { method: 'POST', body: { key } }),
+  unhideCourse: (key: string) =>
+    request<HiddenCoursesReply>(`/hidden/${encodeURIComponent(key)}`, { method: 'DELETE' }),
 
   tasks: () => request<{ tasks: TaskView[] }>('/tasks'),
   task: (id: string) => request<TaskView>(`/tasks/${encodeURIComponent(id)}`),

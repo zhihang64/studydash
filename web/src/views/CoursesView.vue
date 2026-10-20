@@ -10,6 +10,8 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import CourseCard from '@/components/CourseCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import { toast } from '@/composables/useToast'
+import type { CourseView } from '@/api/types'
 import { useCatalogStore } from '@/stores/catalog'
 import { SORT_LABEL, useDashboardStore, type SortKey } from '@/stores/dashboard'
 
@@ -54,6 +56,17 @@ function closeDetail(): void {
   void router.push('/courses')
 }
 
+async function hide(course: CourseView): Promise<void> {
+  try {
+    await dash.hideCourse(course.key)
+    toast.ok(`已隐藏「${course.name}」`, '它和它的作业不再出现在总览与待办里。可以在「已隐藏课程」里恢复。')
+    // 详情页里藏的课已经从 payload 里消失，别再停在一个空详情上
+    if (inDetail.value) closeDetail()
+  } catch (err) {
+    toast.error('隐藏失败', err instanceof Error ? err.message : String(err))
+  }
+}
+
 watch([detailPlatform, detailId], () => {
   if (inDetail.value && !detailCourse.value) void dash.load()
 })
@@ -81,6 +94,9 @@ onMounted(() => {
       <button v-if="inDetail" type="button" class="btn btn--ghost btn--sm" @click="closeDetail">
         返回列表
       </button>
+      <RouterLink v-else class="btn btn--ghost btn--sm" to="/hidden">
+        已隐藏课程<span v-if="dash.hiddenCount" class="hidden-num">{{ dash.hiddenCount }}</span>
+      </RouterLink>
     </header>
 
     <div v-if="!inDetail" class="toolbar">
@@ -144,7 +160,13 @@ onMounted(() => {
     </EmptyState>
 
     <div v-else class="grid">
-      <CourseCard v-for="course in list" :key="course.platform + ':' + course.id" :course="course" />
+      <CourseCard
+        v-for="course in list"
+        :key="course.key || course.platform + ':' + course.id"
+        :course="course"
+        :busy="dash.hiding === course.key"
+        @hide="hide"
+      />
     </div>
   </div>
 </template>
@@ -156,6 +178,16 @@ onMounted(() => {
   align-items: flex-end;
   justify-content: space-between;
   flex-wrap: wrap;
+}
+
+.hidden-num {
+  margin-left: 0.4em;
+  padding: 0 0.45em;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .toolbar {

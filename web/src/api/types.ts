@@ -85,6 +85,8 @@ export interface PlatformMeta {
   status_label?: string
   color: string
   auth: string
+  /** 后端是否真的实现了这个平台的登录流程；false 表示只能手工导入 Cookie。 */
+  login?: boolean
   homepage?: string
   verified?: string
   note?: string
@@ -245,6 +247,38 @@ export interface CourseView {
    * 有它的时候 ratio 仍是 null，但它比一句「无数据」有用得多。
    */
   pending_points?: number
+  /**
+   * 「隐藏课程」用的稳定标识：`平台:课程id:学期id`。
+   *
+   * 后端生成，前端只负责原样回传。不要自己用 `platform + id` 拼——
+   * 同一门课可以有多个学期（高数上下册），那样会把别的学期一起藏掉。
+   */
+  key: string
+  /** 学期 id，和 key 的第三段一致；没有学期信息时是空串。 */
+  term_id?: string
+}
+
+/**
+ * 「已隐藏课程」页用的精简课程卡。和 CourseView 的区别是不带作业明细——
+ * 隐藏页只需要知道「是哪门课、还欠多少」，没必把整份作业列表再传一遍。
+ */
+export interface HiddenCourseView {
+  key: string
+  platform: string
+  platform_name: string
+  id: string
+  name: string
+  teacher: string
+  term: string
+  url: string
+  progress: number
+  has_data?: boolean
+  pending: number
+  overdue: number
+  done: number
+  next_due: string | null
+  next_due_title: string
+  flag?: string
 }
 
 export interface PlatformCard {
@@ -283,6 +317,8 @@ export interface PayloadMeta {
   mode: 'demo' | 'live' | 'import' | string
   readonly: boolean
   warnings: string[]
+  /** 被隐藏的课程数（隐藏课不计入 overview / timeline）。 */
+  hidden_count?: number
 }
 
 export interface PayloadView {
@@ -291,6 +327,8 @@ export interface PayloadView {
   platforms: PlatformCard[]
   timeline: AssignmentView[]
   courses: CourseView[]
+  /** 已隐藏的课程。后端过滤时一并返回，隐藏页直接用它渲染。 */
+  hidden?: HiddenCourseView[]
   accounts: {
     platform: string
     label?: string
@@ -306,6 +344,13 @@ export interface PayloadMetaView {
   mode: string | null
   warnings: string[]
   overview: Partial<OverviewView>
+  hidden_count?: number
+}
+
+/** 隐藏 / 取消隐藏都返回同一份最新列表。 */
+export interface HiddenCoursesReply {
+  hidden: HiddenCourseView[]
+  count: number
 }
 
 export interface DemoSelfSummary {
