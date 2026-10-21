@@ -114,18 +114,31 @@ export interface HttpSettings {
   delay: number
   user_agent: string
   retries: number
+  /** 抓取层并发度。1 = 串行；>1 时账号之间、课程页/作业详情各自并发抓。 */
+  fetch_workers: number
+}
+
+export interface TikuSettings {
+  /** 读回来是打码的（「已配置 …abcd」）；写的时候填新 token，原样回传表示不改。 */
+  token: string
+  token_set: boolean
+  api: string
+  /** 题库覆盖率低于这个值就只保存、不交卷。 */
+  cover_rate: number
 }
 
 export interface SettingsView {
   config_path: string
   home: string
   http: HttpSettings
+  tiku: TikuSettings
   ui: { theme: 'auto' | 'light' | 'dark'; alert_days: number }
   keep_raw: boolean
 }
 
 export interface SettingsPatch {
   http?: Partial<HttpSettings>
+  tiku?: Partial<Pick<TikuSettings, 'token' | 'api' | 'cover_rate'>>
   ui?: { theme?: 'auto' | 'light' | 'dark'; alert_days?: number }
   keep_raw?: boolean
 }

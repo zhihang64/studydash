@@ -7,6 +7,128 @@
 
 ### 新增
 
+- `writeback` 上报完自动同步看板：新增 `aggregate.sync_payload()`，用刚活读的
+  「已完成任务点 X/Y」就地改写 `data/progress.json` 里的进度条、
+  `pending_points`、`overview.avg_progress` 与平台卡均值；只动真上报过的课，
+  别的平台/课不受影响（零额外请求，不需重新整抓）。
+- `writeback` 命令行新增 `--no-sync`；返回体多一个 `sync` 字段，
+  前端任务提示里会多一句「看板已同步」。
+- **递进上报（`--ramp`）**：视频/音频的播放位置不再一次跳到片尾，而是按
+  `RAMP_STEPS = (0.3, 0.7, 1.0)` 分三步发，每步间隔 `--ramp-delay`（默认 1.5 秒）。
+  真机对照：一次性跳满 5 个任务点平台只认 1 个，另 4 个被标上 `videoFaceCaptureEnc`
+  且 `playTime` 占满、`isPassed` 恒 false，成为推不动的死态；三步递进 4 个全过
+  （课程页「已完成任务点」计数真涨）。网页端默认开、CLI 需 `--ramp`。
+- **章节测验自动答题**（`quiz.py`，接线在 `operations.py` / `cli.py` / `CourseCard.vue`）：
+  `iter_targets()` 按 `type == "workid"` 找章节测验，`fetch_page()` 取
+  `mooc1.chaoxing.com/mooc-ans/api/work` 整页，`parse_page()` 用 `div.singleQuesId[data]`
+  当题号、内层 `div.TiMu[data]` 当题型码、`ul > li` 当选项（优先 `aria-label`，剥掉
+  「A、」前缀与尾部「选择」），`answer_to_field()` 把题库答案换成平台要的形状（多选必须
+  排序，判断题认两套说法），`_submit()` 表单 POST `mooc-ans/work/addStudentWorkNew`。
+  覆盖率低于 `cover_rate` 时 `pyFlag=1` 只存不交；默认演练，`--apply` 才发提交请求。
+- **刷章节学习次数**（`learning.py`）：`studentstudyAjax` → 正则抠出
+  `fystat-ans.chaoxing.com/log/setlog…` → GET 该地址计次 → `detect.chaoxing.com/api/monitor`
+  心跳 → 等 30 秒再心跳一次；`--times` 可重复，串行执行。
+- **题库配置**（`tiku.py` 的 `TikuSettings`）：`config.json` 新增 `tiku: {token, api,
+  cover_rate}`，GET `tk.enncy.cn/query?question&token` 取答案，只有回包 `code` 为真才算命中；
+  网页端「设置 → 题库」写入，回读时 token 打码（`已配置 …abcd`），留空表示不改。
+- **字体反爬解码**（`cxfont.py`）：纯标准库解析内嵌 TTF 的 `glyf` 轮廓，按字形哈希查
+  `data/font_map_table.json`（vendor 自上游），康熙部首走 NFKC 归一。
+- **两个新任务类型**：`quiz`（章节测验答题）、`learning`（刷章节学习次数），课程卡上各一个
+  两次确认的按钮，走同一套 SSE 进度。
+
+- **六类任务点上报**（`writeback.py` / `operations.py` / `cli.py` / `CourseCard.vue` /
+  `WritebackPanel.vue`，全部移植自 `chaoxing_tool` 的 `classis/Media/`）：原来只补视频，
+  现在 `iter_targets()` 按卡片节点的 `type` / `property` 把任务点分成六类，`report()`
+  按 `target.kind` 分派——
+  ① `video`/`audio`：仍走原链路（`ananas/status` 取 duration+dtoken，拼
+  `[clazzId][uid][jobid][objectId][playing*1000][salt][duration*1000][0_duration]` 的 md5，
+  GET `multimedia/log/a/…`），`module == "insertaudio"` 的声音也算这一类；
+  ② `read`：GET `mooc1-2.chaoxing.com/ananas/job/readv2?jobid&knowledgeid&courseid&clazzid&jtoken&_dc`；
+  ③ `document`：同参数，路径 `/ananas/job/document`；
+  ④ `book`：同参数，路径 `/ananas/job`（没有子路径），`property` 里有 `bookname` 就归它；
+  ⑤ `live`：GET `zhibo.chaoxing.com/saveTimePc?streamName&vdoid&userId&isStart=0&t&courseId`，
+  `streamName`/`vdoid` 取自 `property`。判定分开：阅读/文档/图书看回包 `status` 为真，
+  直播看正文 `== "@success"`，音视频看有没有回 JSON。`WRITE_URL_PREFIXES` 相应扩到五条
+  精确前缀（前两个 multimedia 段，加 `ananas/job?`、`ananas/job/readv2?`、
+  `ananas/job/document?`、`zhibo.chaoxing.com/saveTimePc?`），别的地址照旧拒发。
+  缺 `objectId`（音视频）或 `jtoken`（其余）的目标直接记失败并说明原因，不发请求。
+  新增 `plan(courses, *, limit=0, kinds=None)` / `run(..., kinds=None)` 过滤参数，
+  `"read,document"` 这样的串和 `["read"]` 这样的列表都认；CLI 加
+  `-k/--kind {video,audio,read,document,book,live}`（可重复，不传就是六类全补），
+  web 侧 `op_writeback` 认 `kinds`，课程卡与面板各多一个「范围」下拉
+  （全部 / 音视频 / 阅读·文档 / 图书 / 直播）。结果行多一个 `kind` 字段。
+- 顺带：`ChaoxingVideoWriter` 类名保留（改名会动 8 处引用和全部测试），
+  新增的结构体仍是 `VideoTarget`，只是多带了 `kind` / `jtoken` / `stream_name` / `vdoid`。
+
+- **抓取层并发**（providers/base.py / providers/chaoxing.py / aggregate.py）：
+  `HttpSettings` 新增 `fetch_workers`（1~8，默认 1 = 保持旧行为）。>1 时三个地方同时并行：
+  ① 账号之间（`aggregate()` 里的 `run_one`）；② 同一账号下各课程页的进度抓取
+  （`_fill_progress`）；③ 作业详情（`_fill_works`）与逐章任务点卡片（`_enrich_with_chapters`）。
+  每个工作线程各自持一份 `HttpClient`（`Provider._client()` 用 `threading.local()` 缓存，
+  主线程仍返回 `self.http`，否则共享实例的 `delay` 限速和 `CookieJar` 会把并发退化成串行）。
+  实测 `aggregate()` 22 门课 87.2s / 28 次请求，耗时几乎全在 `_wait()` 的 sleep 上，
+  所以收益上限约等于 `fetch_workers` 倍。结果一律**按原序回填**（平台卡顺序、课程顺序、
+  作业顺序都不能随线程快慢漂移）；单个任务抛异常只挖掉自己那一格（`map_concurrent` 手写
+  future 回填，不用 `executor.map`，因为后者遇异常会丢掉后面已完成的结果）；`fetch_workers <= 1`
+  时走同线程串行分支，保证测试里 `provider.http` 的替身仍然生效。设置页新增「抓取并发线程」。
+
+- **并发上报**（writeback.py / operations.py / CourseCard.vue / WritebackPanel.vue）：
+  writeback 新增 -j/--workers N，web 侧 options 加 workers（上限 8），课程卡按钮下面
+  多一个「并发」下拉（1/2/4/8）。每个工作线程走自己的 HttpClient（_client() 按线程缓存），
+  否则共享实例的限速会变成全局串行化点。结果仍按 plan 的顺序返回，单个点炸了只影响它自己。
+  --paced 强制退回串行——那种模式的意义就是让请求在时间上摊开。
+- **上报判定改成以平台 `isPassed` 为准**（`writeback.py` 的 `_judge`）：之前把
+  `isPassed=false` 解释成「没有剩余可报」，于是界面报成功、平台上任务点一动不动。
+  现在只有 `isPassed=true` 才算完成，false 记「平台没确认」，结果行和结局文案都不再美化。
+- **播放位置已满但没过的那种视频直接跳过**（`VideoTarget.play_time_ms` / `passed`，
+  `iter_targets` 填充、`report()` 判定）：`playTime >= attDuration*1000` 且 `isPassed`
+  不为真时一个请求都不发，原因写「平台记的播放位置已满（X/Y 秒）但任务点没通过，重复上报无效」。
+- **上报前后对比「已完成任务点」**（`mission_counts()` + 模块级 `parse_mission_counts()`，
+  端点 `EP_MISSION`，正则 `RE_MISSION` / `RE_MISSION_LOOSE`）：命令行打
+  `已完成任务点：课程 60 → 61 / 1442（+1）`，网页结局文案带 `59 → 60 / 1442` 一段，
+  `op_writeback` 返回体多 `mission: {before, after}`。这是目前唯一能证明「真的生效」的判据。
+- **上报进度条与成败提示**（web/src/components/CourseCard.vue、ProgressBar.vue）：
+  上报时按钮下面就地出现一条进度条，按任务点的实时 progress 填充并显示当前任务点；
+  跑完变成结局文案——绿「已上报 N/M 个任务点」、红「N/M 成功，K 个失败」、灰「没有需要
+  上报的视频」。走 SSE，断线自动降级轮询。顺带修了 ProgressBar 的填充宽度：scoped 样式
+  里只声明了 `transition: width`，没有任何地方给 width 赋值，所有进度条此前都是空轨道。
+- ~~**isPassed=false 不再算失败**~~（这条判断已被推翻，见上面「上报判定改成以平台
+  isPassed 为准」）。
+- **课程卡上的「上报视频时长」按钮**（`web/src/components/CourseCard.vue`）：上报入口从
+  总览页搬到每张超星课程卡右上角——点一下变「确认上报？」，**四秒内再点一次**才真的
+  发，不点它自己退回原样。前端传 `course_id`，后端按课程号精确锁死一门课，不碰别的课。
+  想要演练 / 逐分钟 / 限个数 / 课名过滤，仍走总览页页头那张完整开关卡片
+  （`WritebackPanel.vue`）。
+- **总览页页头的「上报视频时长」面板**（`web/src/components/WritebackPanel.vue`）：与
+  「抓取数据」并排。点开是张卡片，四个开关（真的上报 / 逐分钟 / 只做前 N 个 /
+  课名过滤），默认全部是**演练**——勾上「真的上报」还要再点一次「确认，真的发出去」
+  才会真的发。进度和逐条结果走 SSE 推回来；没绑学习通账号时按钮只弹提示，不发请求。
+  侧栏底部原来那句「只读工具：不刷视频」改成「默认只读，唯一例外是手动点的上报」。
+- **视频观看位置上报**（`writeback.py` + `studydash writeback`，实验性，只支持 `chaoxing`）：
+  本项目**唯一的写操作**，因此被单独隔离——不加 `--apply` 一律只演练，一个请求都不发；
+  上报地址钉死在 `WRITE_URL_PREFIXES`（只有 `https://mooc1.chaoxing.com/mooc-ans/multimedia/log/a/` 与不带 `mooc-ans` 的老路径两条），
+  别的地址直接拒发；它不出现在 `fetch` / `all` / `web` 的任何调用链里，只在你亲手敲命令时跑；
+  网络出口仍是 `HttpClient`，`assert_readonly()` 依旧返回空，`READ_METHODS` 没放宽。
+  链路搬自 `chaoxing_tool` 的 `classis/Media/Video.py do_finish()`：从卡片 JSON 取
+  `objectId`/`jobid`/`otherInfo`，读 `ananas/status` 拿 `duration`/`dtoken`，按
+  `[{clazzId}][{uid}][{jobid}][{objectId}][{playing*1000}][d_yHJ!$pdA~5][{duration*1000}][0_{duration}]`
+  拼 md5 签名后 GET 上报。`--paced` 走平台真实节奏（每段 59 秒，`isdrag` 3 → 0 → 4），
+  不加则一次报到片尾。是否成功只看响应 `isPassed`，为假即失败，不重试不美化。
+  原工具里代刷阅读、章节测验答题、账号密码登录一概没搬。
+- **超星 stat2 补充数据源**（`providers/chaoxing_stat.py`，新平台 `chaoxing_stat`，未验证）：
+  `chaoxing` 走的是课程页/作业页那条线，拿不到「学了多少次、累计看了多久、逐条任务点
+  明细」——这三样在 `stat2-ans.chaoxing.com` 上。新适配器复用同一份超星 Cookie，独立
+  注册成一个 `id`，把这几条只读查询接进看板：`study-pv/chart` 取当月学习次数、
+  `task/s/index` 解析已完成分钟 + `总时长` 正则取总量、`task/s/progress/detail` 拉任务点
+  明细。`jobEnc` 从 `study-data/index` 的 HTML 里抠，抠不到就只出课程列表、不发后续请求。
+  数据只进 `course.extra`（`minutes_done`/`minutes_total`/`study_count`/`task_count`/
+  `tasks`/`stat2`），**不写 `progress`**——stat2 的时长口径和课程页的任务点口径不是一回事，
+  混进 `Course.ratio` 会把进度算歪。
+  来源是第三方工具 `chaoxing_tool`，但只搬了查询：它里面伪造播放进度上报、代刷时长、
+  账号密码登录那几块一概没要（`ReadOnlyError` 闸门也过不去）。接口没经过真实账号验证，
+  改版后用 `studydash probe chaoxing_stat` 留档。
+- 顺手修掉上游的一个 bug：学习次数接口的 `year`/`month` 在原工具里写死成
+  `2023` / `03`，这里改成取当前年月，否则永远只报 2023 年 3 月的数据。
 - **超星章节任务点明细**（`providers/chaoxing.py`，真实账号验证 2026-10-20）：
   课程页里的 `fanyaChapterWhite` 章节树现在完整解析——「第N章 → 节 → 小节」的层级、
   每节「还差几个任务点」以及上锁的节，都跟着进度查询一起拿到（**零额外请求**）。
@@ -68,6 +190,24 @@
   网页版登录面板在选中头歌时只显示后两类页签；`login_qr` / `login_password` 会被
   明确拒绝并提示改用哪条路，而不是拿超星的协议去撞。
 
+### 修复
+- **不再把「发了请求」当成功，并认出两种救不回来的视频**：`isPassed=false` 记
+  `ok=False`（`status="unconfirmed"`）；`videoFaceCaptureEnc` 非空的视频在发请求前就标
+  `skipped`，`playTime` 已满的标 `stuck`；结果行多 `status`（`passed`/`unconfirmed`/
+  `stuck`/`skipped`），`counts` 多 `stuck`，课程页「已完成任务点 X/Y」前后对比照旧。
+
+- **`mArg` 解析不再吞尾巴**（`providers/chaoxing.py`，真实账号验证 2026-10-21）：
+  旧正则 `mArg\s*=\s*(\{[\s\S]*?\})\s*catch` 会把对象闭合后的 `};` 一起带进去，
+  `json.loads` 报 `Extra data`，于是**所有课程的知识卡页都解析不出任务点**，
+  `writeback` 演练一直是空的。现在改成 `extract_marg()`：用前瞻断言跳过页面上那句
+  `mArg = "";`，再按花括号层级扫描并跳过字符串字面量里的括号，取到完整对象就收手。
+- **`writeback` 从卡片 JSON 的 `defaults` 里取 `reportUrl`**（同上，真实账号验证）：
+  平台把 `reportUrl` / `clazzId` / `cpi` 放在 `defaults` 子对象里，不在顶层；原先从顶层
+  读，`report_url` 恒为空，所有任务点都在「卡片没有 reportUrl」这一步被判跳过。现在优先
+  读 `defaults`，读不到才退回顶层。同时把 `WRITE_URL_PREFIXES` 补上真实路径
+  `https://mooc1.chaoxing.com/mooc-ans/multimedia/log/a/`（老的 `/multimedia/log/a/`
+  也留着，便于兼容其他部署）。
+
 ### 说明
 
 - 只读边界不变：作业列表与详情都是 GET，不碰任何提交/答题接口；MOOC 的登录态自检
@@ -83,6 +223,11 @@
 
 ### 新增
 
+- **并发上报**（writeback.py / operations.py / CourseCard.vue / WritebackPanel.vue）：
+  writeback 新增 -j/--workers N，web 侧 options 加 workers（上限 8），课程卡按钮下面
+  多一个「并发」下拉（1/2/4/8）。每个工作线程走自己的 HttpClient（_client() 按线程缓存），
+  否则共享实例的限速会变成全局串行化点。结果仍按 plan 的顺序返回，单个点炸了只影响它自己。
+  --paced 强制退回串行——那种模式的意义就是让请求在时间上摊开。
 - **网页版后端**（`src/studydash/web/`，FastAPI + uvicorn，可选依赖 `studydash[web]`）：
   15 个端点，覆盖健康检查、平台名录、环境自检、设置读写、账号增删改、任务创建/查询/
   取消/事件流、看板数据与演示数据。契约冻结在 `docs/web-api.md`。
@@ -158,6 +303,11 @@ v2.1.0 的登录要你切到一个新开的浏览器窗口里去完成，使用�
 
 ### 新增
 
+- **并发上报**（writeback.py / operations.py / CourseCard.vue / WritebackPanel.vue）：
+  writeback 新增 -j/--workers N，web 侧 options 加 workers（上限 8），课程卡按钮下面
+  多一个「并发」下拉（1/2/4/8）。每个工作线程走自己的 HttpClient（_client() 按线程缓存），
+  否则共享实例的限速会变成全局串行化点。结果仍按 plan 的顺序返回，单个点炸了只影响它自己。
+  --paced 强制退回串行——那种模式的意义就是让请求在时间上摊开。
 - **终端扫码登录**（`studydash login`，现为默认）。工具直接向超星要一张一次性登录
   票据，用纯标准库把返回的 PNG 解成点阵，**画在终端里**；手机上的「学习通」App 扫一下
   并确认即可拿到会话。不用开浏览器、不用装扩展、不用 F12 手抄 Cookie。二维码约两分钟
@@ -213,6 +363,11 @@ v2.1.0 的登录要你切到一个新开的浏览器窗口里去完成，使用�
 
 ### 新增
 
+- **并发上报**（writeback.py / operations.py / CourseCard.vue / WritebackPanel.vue）：
+  writeback 新增 -j/--workers N，web 侧 options 加 workers（上限 8），课程卡按钮下面
+  多一个「并发」下拉（1/2/4/8）。每个工作线程走自己的 HttpClient（_client() 按线程缓存），
+  否则共享实例的限速会变成全局串行化点。结果仍按 plan 的顺序返回，单个点炸了只影响它自己。
+  --paced 强制退回串行——那种模式的意义就是让请求在时间上摊开。
 - **`studydash login`**：一条命令完成「登录 → 拿会话 → 抓取 → 渲染 → 打开」。
   默认新开一个**隔离配置档的浏览器窗口**（不碰你日常那个，所以不用关掉正在用的
   Edge/Chrome），你在里面正常登录（扫码 / 验证码 / 二次验证都你自己过），程序从调试
@@ -278,6 +433,11 @@ v2.1.0 的登录要你切到一个新开的浏览器窗口里去完成，使用�
 
 ### 新增
 
+- **并发上报**（writeback.py / operations.py / CourseCard.vue / WritebackPanel.vue）：
+  writeback 新增 -j/--workers N，web 侧 options 加 workers（上限 8），课程卡按钮下面
+  多一个「并发」下拉（1/2/4/8）。每个工作线程走自己的 HttpClient（_client() 按线程缓存），
+  否则共享实例的限速会变成全局串行化点。结果仍按 plan 的顺序返回，单个点炸了只影响它自己。
+  --paced 强制退回串行——那种模式的意义就是让请求在时间上摊开。
 - **多平台聚合**。适配器（provider）是插件，内置：
   - `chaoxing` 超星学习通（beta）
   - `icourse163` 中国大学 MOOC（未验证）
@@ -348,6 +508,11 @@ v2.1.0 的登录要你切到一个新开的浏览器窗口里去完成，使用�
 
 ### 新增
 
+- **并发上报**（writeback.py / operations.py / CourseCard.vue / WritebackPanel.vue）：
+  writeback 新增 -j/--workers N，web 侧 options 加 workers（上限 8），课程卡按钮下面
+  多一个「并发」下拉（1/2/4/8）。每个工作线程走自己的 HttpClient（_client() 按线程缓存），
+  否则共享实例的限速会变成全局串行化点。结果仍按 plan 的顺序返回，单个点炸了只影响它自己。
+  --paced 强制退回串行——那种模式的意义就是让请求在时间上摊开。
 - **聚合看板**：总览指标、课程卡片（分项进度条）、落后预警、截止时间线、搜索/筛选/排序。
 - **三条数据接入路径**
   - `fetch`：用你自己的 Cookie，只读拉取课程列表。

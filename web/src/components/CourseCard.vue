@@ -9,7 +9,8 @@
  */
 import { computed, ref } from 'vue'
 
-import type { CourseView } from '@/api/types'
+import type { CourseView, TaskView } from '@/api/types'
+import { useTasksStore } from '@/stores/tasks'
 import { countdownText, formatAgo, formatDue, percentText } from '@/utils/format'
 
 import AssignmentItem from './AssignmentItem.vue'
@@ -20,11 +21,252 @@ const props = defineProps<{ course: CourseView; busy?: boolean }>()
 
 defineEmits<{ hide: [course: CourseView] }>()
 
+const tasks = useTasksStore()
+
 const expanded = ref(false)
 const chaptersOpen = ref(false)
 
-const hasData = computed(() => props.course.has_data !== false)
+/**
+ * 课程卡上的「上报任务点」按钮。
+ *
+ * 只有超星有这条写路径（其它平台的适配器不带 writeback），所以按钮也只在那出现。
+ * 点了先变「确认上报」再点一次才真的发——写平台数据不该是一次误触就发生的事，
+ * 但也不值得为它开个弹窗（全仓没有 modal 组件，弹窗反而是更大的改动）。
+ */
+const confirmOpen = ref(false)
+const canReport = computed(() => props.course.platform === 'chaoxing')
 
+/**
+ * 这一次上报处理哪几类任务点。
+ *
+ * 学习通的任务点分六类，协议完全不同：音视频要 md5 签名上报播放位置，
+ * 阅读/文档/图书是一次性 GET 任务点接口，直播要 streamName+vdoid。
+ * 用户大概率只想补其中一类，所以给档位而不是六个复选框——课程卡右边太窄了。
+ * `all` 传空数组，后端 `_as_kinds` 会把它当成「全都要」。
+ */
+const KIND_SCOPES = {
+  all: [],
+  media: ['video', 'audio'],
+  text: ['read', 'document'],
+  book: ['book'],
+  live: ['live'],
+} as const
+
+type KindScope = keyof typeof KIND_SCOPES
+
+const kindScope = ref<KindScope>('all')
+const kindList = computed(() => [...KIND_SCOPES[kindScope.value]])
+
+/**
+ * 这条课程卡一次点下去用几个线程。
+ *
+ * 上报本身是「一个任务点一次 GET」，彼此不依赖，所以并发是纯粹的加速手段：
+ * 一门课几十个任务点，串行要几十次往返，4 并发能压到四分之一。
+ * 默认还是 1 —— 写平台数据这件事，默认该是最保守的那个。
+ */
+const workers = ref(1)
+
+/**
+ * 递进上报：把播放位置按 30% / 70% / 100% 分三步发，每步间隔 1.5 秒。
+ *
+ * 实测一次性跳满，5 个任务点平台只认 1 个，还把另外 4 个标上人脸抓拍变成死态；
+ * 分三步递进 4 个全过。多两次请求换通过率，默认开。
+ */
+const ramp = ref(true)
+
+/** 这一次上报对应的任务 id。进度和结果都从这里读，不再靠一个本地 bool 猜状态。 */
+const reportTaskId = ref('')
+
+/**
+ * 上报任务的实时快照。
+ *
+ * 存在 `tasks` store 里，SSE 断了会降级成轮询（store 内部已经处理），
+ * 所以这里直接读就行，不用自己再开定时器。
+ */
+const reportTask = computed<TaskView | null>(() => {
+  if (!reportTaskId.value) return null
+  return tasks.find(reportTaskId.value)?.task ?? null
+})
+
+const reporting = computed(() => {
+  const task = reportTask.value
+  return !!task && !tasks.isFinished(task)
+})
+
+/** 进度条只在真跑起来时出现；派发前的几十毫秒没必要闪一下。 */
+const progressRatio = computed<number | null>(() => {
+  const task = reportTask.value
+  if (!task || !reporting.value) return null
+  return task.progress
+})
+
+interface MissionLine {
+  done: number
+  total: number
+}
+
+/** 从任务结果里取「已完成任务点」前后对比；取不到就返回 null（老任务没有这个字段）。 */
+function missionGain(raw: unknown): { from: number; to: number; total: number } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const bag = raw as { before?: Record<string, MissionLine>; after?: Record<string, MissionLine> }
+  const before = bag.before ?? {}
+  const after = bag.after ?? {}
+  const key = Object.keys(before)[0]
+  if (!key) return null
+  const start = before[key]
+  const end = after[key]
+  if (!start || !end) return null
+  return { from: start.done, to: end.done, total: end.total }
+}
+
+/** 跑完之后的结局，一句话。成功/失败/取消要能一眼区分。 */
+const outcome = computed<{ tone: 'ok' | 'danger' | 'muted'; text: string } | null>(() => {
+  const task = reportTask.value
+  if (!task || !tasks.isFinished(task)) return null
+  if (task.state === 'failed') {
+    return { tone: 'danger', text: task.error?.message || task.message || '上报失败' }
+  }
+  if (task.state === 'cancelled') return { tone: 'muted', text: '已取消' }
+  const counts = (task.result?.counts ?? {}) as {
+    done?: number
+    failed?: number
+    total?: number
+    stuck?: number
+    unsupported?: number
+  }
+  const total = counts.total ?? 0
+  if (!total) return { tone: 'muted', text: '没有需要上报的任务点' }
+  const stuck = counts.stuck ?? 0
+  const failed = (counts.failed ?? 0) - stuck
+  /** 课程页上的「已完成任务点 X/Y」，这是平台自己算的，比 isPassed 可信。 */
+  const gain = missionGain(task.result?.mission)
+  const suffix = gain === null ? '' : `，已完成任务点 ${gain.from} → ${gain.to} / ${gain.total}`
+  /** 章节测验、讨论这些本工具不做，但平台把它们算进任务点总数。 */
+  const skip = counts.unsupported ?? 0
+  const skipTail = skip ? `；另有 ${skip} 个任务点（章节测验等）本工具不做` : ''
+  if (stuck && !failed) {
+    return {
+      tone: 'danger',
+      text: `平台确认 ${counts.done ?? 0}/${total}；${stuck} 个播放已满却没判通过（平台死态，只能手动重看）${skipTail}${suffix}`,
+    }
+  }
+  if (failed || stuck) {
+    const tail = stuck ? `，另有 ${stuck} 个播放已满判不过` : ''
+    return {
+      tone: 'danger',
+      text: `平台确认 ${counts.done ?? 0}/${total}，${failed} 个未确认${tail}${skipTail}${suffix}`,
+    }
+  }
+  return {
+    tone: 'ok',
+    text: `平台确认 ${counts.done ?? 0}/${total} 个任务点${skipTail}${suffix}`,
+  }
+})
+
+/** 点了第一次之后 4 秒不动就退回原样，免得「确认上报？」一直挂着。 */
+let confirmTimer = 0
+
+const reportLabel = computed(() => {
+  if (reporting.value) return '上报中…'
+  if (confirmOpen.value) return '确认上报？'
+  return outcome.value ? '再上报一次' : '上报任务点'
+})
+
+async function reportVideo(): Promise<void> {
+  if (reporting.value) return
+  window.clearTimeout(confirmTimer)
+  if (!confirmOpen.value) {
+    confirmOpen.value = true
+    confirmTimer = window.setTimeout(() => {
+      confirmOpen.value = false
+    }, 4000)
+    return
+  }
+  confirmOpen.value = false
+  const task = await tasks.start('writeback', {
+    platform: props.course.platform,
+    course_id: props.course.id,
+    apply: true,
+    kinds: kindList.value,
+    workers: Math.max(1, Math.min(8, Number(workers.value) || 1)),
+    ramp: ramp.value,
+  })
+  reportTaskId.value = task?.id ?? ''
+}
+
+/**
+ * 章节测验答题 / 刷学习次数：和上报同一套「点两次才真干」的规矩。
+ *
+ * 测验会真的提交答案（低覆盖率时后端只存不交），刷次数会真的占平台计数窗口，
+ * 所以两个按钮都不接受一次误触。
+ */
+const quizOpen = ref(false)
+const learnOpen = ref(false)
+const quizTaskId = ref('')
+const learnTaskId = ref('')
+
+const quizLabel = computed(() => {
+  if (quizRunning.value) return '答题中…'
+  return quizOpen.value ? '确认答题？' : '测验答题'
+})
+
+const learnLabel = computed(() => {
+  if (learnRunning.value) return '刷次数中…'
+  return learnOpen.value ? '确认刷次数？' : '刷学习次数'
+})
+
+function runningOf(taskId: string): boolean {
+  if (!taskId) return false
+  const task = tasks.find(taskId)?.task
+  return !!task && !tasks.isFinished(task)
+}
+
+const quizRunning = computed(() => runningOf(quizTaskId.value))
+const learnRunning = computed(() => runningOf(learnTaskId.value))
+
+async function startQuiz(): Promise<void> {
+  if (quizRunning.value) return
+  window.clearTimeout(quizTimer)
+  if (!quizOpen.value) {
+    quizOpen.value = true
+    quizTimer = window.setTimeout(() => {
+      quizOpen.value = false
+    }, 4000)
+    return
+  }
+  quizOpen.value = false
+  const task = await tasks.start('quiz', {
+    platform: props.course.platform,
+    course_id: props.course.id,
+    apply: true,
+  })
+  quizTaskId.value = task?.id ?? ''
+}
+
+async function startLearn(): Promise<void> {
+  if (learnRunning.value) return
+  window.clearTimeout(learnTimer)
+  if (!learnOpen.value) {
+    learnOpen.value = true
+    learnTimer = window.setTimeout(() => {
+      learnOpen.value = false
+    }, 4000)
+    return
+  }
+  learnOpen.value = false
+  const task = await tasks.start('learning', {
+    platform: props.course.platform,
+    course_id: props.course.id,
+    apply: true,
+    times: 1,
+  })
+  learnTaskId.value = task?.id ?? ''
+}
+
+let quizTimer = 0
+let learnTimer = 0
+
+const hasData = computed(() => props.course.has_data !== false)
 const percent = computed(() => percentText(props.course.ratio, 1, ''))
 
 const flagTone = computed(() => {
@@ -111,10 +353,97 @@ const emptyPartHint = computed(() => {
         </p>
       </div>
 
-      <p class="course__pct" :class="{ 'course__pct--missing': !hasData }">
-        <span v-if="hasData" class="course__num">{{ percent }}</span>
-        <span v-else class="course__nodata">无数据</span>
-      </p>
+      <div class="course__side">
+        <p class="course__pct" :class="{ 'course__pct--missing': !hasData }">
+          <span v-if="hasData" class="course__num">{{ percent }}</span>
+          <span v-else class="course__nodata">无数据</span>
+        </p>
+        <button
+          v-if="canReport"
+          type="button"
+          class="btn btn--sm course__report"
+          :class="confirmOpen ? 'btn--danger' : 'btn--ghost'"
+          :disabled="reporting"
+          :title="confirmOpen ? '再点一下就真的向学习通上报' : `把「${course.name}」里没做完的任务点补上`"
+          @click="reportVideo"
+        >
+          {{ reportLabel }}
+        </button>
+        <button
+          v-if="canReport && !reporting"
+          type="button"
+          class="btn btn--sm course__report"
+          :class="quizOpen ? 'btn--danger' : 'btn--ghost'"
+          :disabled="quizRunning"
+          :title="
+            quizOpen
+              ? '再点一下就真的把答案交上去'
+              : `把「${course.name}」里的章节测验做一遍（题库答不全时只保存不交卷）`
+          "
+          @click="startQuiz"
+        >
+          {{ quizLabel }}
+        </button>
+        <button
+          v-if="canReport && !reporting"
+          type="button"
+          class="btn btn--sm course__report"
+          :class="learnOpen ? 'btn--danger' : 'btn--ghost'"
+          :disabled="learnRunning"
+          :title="
+            learnOpen
+              ? '再点一下就真的去刷学习次数'
+              : `给「${course.name}」刷一轮章节学习次数（每轮约 30 秒）`
+          "
+          @click="startLearn"
+        >
+          {{ learnLabel }}
+        </button>
+        <label
+          v-if="canReport && !reporting"
+          class="course__speed"
+          :title="'只补某一类任务点：音视频要签名、阅读/文档/图书是一次性提交、直播要 streamName'"
+        >
+          <span class="faint">范围</span>
+          <select v-model="kindScope" class="course__select">
+            <option value="all">全部</option>
+            <option value="media">音视频</option>
+            <option value="text">阅读/文档</option>
+            <option value="book">图书</option>
+            <option value="live">直播</option>
+          </select>
+        </label>
+        <label
+          v-if="canReport && !reporting"
+          class="course__speed"
+          :title="'一条一条发最稳；调到 4 能快几倍，但请求会同时打出去'"
+        >
+          <span class="faint">并发</span>
+          <select v-model.number="workers" class="course__select">
+            <option :value="1">1</option>
+            <option :value="2">2</option>
+            <option :value="4">4</option>
+            <option :value="8">8</option>
+          </select>
+        </label>
+        <label
+          v-if="canReport && !reporting"
+          class="course__speed"
+          :title="'递进上报：播放位置按 30% / 70% / 100% 分三步发。一次性跳满实测大多不被平台认，分步才记通过'"
+        >
+          <input v-model="ramp" type="checkbox" />
+          <span class="faint">递进</span>
+        </label>
+        <div v-if="progressRatio !== null" class="course__reportbar">
+          <ProgressBar :ratio="progressRatio" size="sm" show-value />
+          <p class="course__reportmsg faint truncate" :title="reportTask?.message">
+            {{ reportTask?.message || '正在上报' }}
+          </p>
+        </div>
+        <p v-else-if="outcome" class="course__reportmsg" :class="`course__reportmsg--${outcome.tone}`">
+          {{ outcome.text }}
+        </p>
+      </div>
     </header>
 
     <div v-if="showSummaryBar" class="course__bar">
@@ -279,6 +608,73 @@ const emptyPartHint = computed(() => {
 .course__hide:disabled {
   cursor: progress;
   opacity: 0.6;
+}
+
+.course__side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--s-1);
+  align-items: flex-end;
+}
+
+.course__report {
+  white-space: nowrap;
+}
+
+/* 上报进度就贴在按钮下面，跟按钮同宽，不另起一行占版面。 */
+.course__reportbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  width: 8.5rem;
+  margin-top: var(--s-1);
+}
+
+.course__reportmsg {
+  margin: 0;
+  max-width: 12rem;
+  font-size: var(--fs-xs);
+  line-height: 1.35;
+  text-align: right;
+}
+
+.course__reportmsg--ok {
+  color: var(--ok);
+}
+
+.course__reportmsg--danger {
+  color: var(--danger);
+}
+
+.course__reportmsg--muted {
+  color: var(--text-faint);
+}
+
+/* 并发档位：跟按钮同一列，小一号，看起来像按钮的附注而不是另一个控件。 */
+.course__speed {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.course__select {
+  padding: 0 var(--s-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.course__select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .course__pct {

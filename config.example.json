@@ -5,11 +5,17 @@
     "timeout": 8.0,
     "delay": 0.4,
     "retries": 2,
+    "fetch_workers": 1,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
   },
   "ui": {
     "alert_days": 3.0,
     "theme": "auto"
+  },
+  "tiku": {
+    "token": "题库服务的 token，留空表示不用自动答题",
+    "api": "https://tk.enncy.cn/query",
+    "cover_rate": 0.8
   },
   "accounts": [
     {
@@ -19,6 +25,15 @@
       "cookie": "把浏览器里登录后的完整 Cookie 串粘到这里，形如：_uid=1234567; _d=...; UID=...; vc3=...;",
       "options": {
         "chapters": false
+      }
+    },
+    {
+      "platform": "chaoxing_stat",
+      "label": "超星学习统计（复用上面那份 Cookie）",
+      "enabled": false,
+      "cookie": "和 platform=chaoxing 那条填同一串 Cookie 即可，不用另外登录",
+      "options": {
+        "max_courses": 60
       }
     }
   ]

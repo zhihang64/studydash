@@ -30,6 +30,7 @@ from typing import Any, Iterable, Mapping
 
 from .model import SCHEMA_VERSION
 from .providers import AccountConfig, HttpSettings
+from .tiku import TikuSettings
 
 __all__ = ["Workspace", "Config", "CONFIG_NAME", "ENV_HOME", "atomic_write_json"]
 
@@ -142,6 +143,8 @@ class Config:
     schema_version: int = SCHEMA_VERSION
     accounts: list[AccountConfig] = field(default_factory=list)
     http: HttpSettings = field(default_factory=HttpSettings)
+    #: 题库（章节测验答题用）；token 由用户自己在设置页填
+    tiku: TikuSettings = field(default_factory=TikuSettings)
     ui: dict[str, Any] = field(default_factory=dict)
     #: 抓取时自动写进 data/raw/ 的原始响应留档开关
     keep_raw: bool = True
@@ -166,6 +169,7 @@ class Config:
             schema_version=schema,
             accounts=accounts,
             http=HttpSettings.from_dict(data.get("http")),
+            tiku=TikuSettings.from_dict(data.get("tiku")),
             ui=dict(raw_ui) if isinstance(raw_ui, Mapping) else {},
             keep_raw=bool(data.get("keep_raw", True)),
         )
@@ -189,6 +193,7 @@ class Config:
             "$schema": "https://raw.githubusercontent.com/zhihang64/studydash/main/config.schema.json",
             "accounts": [a.to_dict(redact=redact) for a in self.accounts],
             "http": self.http.to_dict(),
+            "tiku": self.tiku.to_dict(),
             "ui": dict(self.ui),
             "keep_raw": self.keep_raw,
         }

@@ -40,9 +40,15 @@ const clamped = computed(() => (available.value ? clamp01(Number(props.ratio)) :
 
 const text = computed(() => percentText(props.ratio ?? null))
 
-const barStyle = computed(() =>
-  props.color ? { background: props.color } : undefined,
-)
+/**
+ * 填充宽度必须写在这儿：scoped 样式里只有 ``transition: width``，没有宽度值，
+ * 少了这一条进度条永远只是一条空轨道。
+ */
+const barStyle = computed(() => {
+  const style: Record<string, string> = { width: `${clamped.value * 100}%` }
+  if (props.color) style.background = props.color
+  return style
+})
 </script>
 
 <template>

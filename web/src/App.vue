@@ -126,7 +126,7 @@ watch(
 
       <footer class="side__foot">
         <p class="side__note">
-          只读工具：只把数据读出来看，不交作业、不刷视频、不替你点按钮。
+          默认只读：抓取、看板、提醒都不动平台数据。唯一例外是课程页每张超星课程卡右侧的「上报任务点」——点两下确认才会真的写。
         </p>
         <p class="side__meta mono">v{{ session.version || session.bootVersion || '—' }}</p>
       </footer>

@@ -15,6 +15,7 @@ import KpiCard from '@/components/KpiCard.vue'
 import NoteBanner from '@/components/NoteBanner.vue'
 import PlatformChip from '@/components/PlatformChip.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
+import WritebackPanel from '@/components/WritebackPanel.vue'
 import { toast } from '@/composables/useToast'
 import { useAccountsStore } from '@/stores/accounts'
 import { useCatalogStore } from '@/stores/catalog'
@@ -90,6 +91,27 @@ async function fetchNow(): Promise<void> {
   await tasks.start('fetch', {})
 }
 
+/* --------------------------------------------------------- 任务点上报 */
+
+/** 上报面板开着没有。这是全站唯一会写平台数据的地方。 */
+const writebackOpen = ref(false)
+
+/** 有没有学习通账号——没有的话按钮点了也只能弹一句提示。 */
+const canWriteback = computed(() => accounts.has('chaoxing'))
+
+/** 这台机器上有没有正在跑的上报任务，跑着就不许再开一轮。 */
+const writebackRunning = computed(() =>
+  tasks.active.some((t) => t.kind === 'writeback'),
+)
+
+function openWriteback(): void {
+  if (!canWriteback.value) {
+    toast.warn('还没有学习通账号', '先去「账号」页扫码登录一个，再回来上报。')
+    return
+  }
+  writebackOpen.value = true
+}
+
 onMounted(() => {
   void dash.load()
   void accounts.load()
@@ -118,6 +140,14 @@ defineExpose({ fetchNow })
         <RouterLink v-if="!canFetch" class="btn" to="/accounts">先去绑定账号</RouterLink>
         <button
           type="button"
+          class="btn"
+          :disabled="writebackRunning"
+          @click="openWriteback"
+        >
+          {{ writebackRunning ? '上报进行中…' : '上报任务点' }}
+        </button>
+        <button
+          type="button"
           class="btn btn--primary"
           :disabled="fetching || !canFetch"
           @click="fetchNow"
@@ -126,6 +156,8 @@ defineExpose({ fetchNow })
         </button>
       </div>
     </header>
+
+    <WritebackPanel :open="writebackOpen" @close="writebackOpen = false" />
 
     <!-- 警告 -->
     <NoteBanner

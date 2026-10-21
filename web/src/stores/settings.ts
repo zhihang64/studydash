@@ -7,7 +7,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { api } from '@/api/client'
-import type { CheckItem, HttpSettings, SettingsPatch, SettingsView } from '@/api/types'
+import type { CheckItem, HttpSettings, SettingsPatch, SettingsView, TikuSettings } from '@/api/types'
 import { setThemeFromServer } from '@/composables/useTheme'
 
 const DEFAULT_HTTP: HttpSettings = {
@@ -15,6 +15,14 @@ const DEFAULT_HTTP: HttpSettings = {
   delay: 0.4,
   retries: 2,
   user_agent: '',
+  fetch_workers: 1,
+}
+
+const DEFAULT_TIKU: TikuSettings = {
+  token: '',
+  token_set: false,
+  api: 'https://tk.enncy.cn/query',
+  cover_rate: 0.8,
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -26,6 +34,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const error = ref('')
 
   const http = computed<HttpSettings>(() => view.value?.http ?? DEFAULT_HTTP)
+  const tiku = computed<TikuSettings>(() => view.value?.tiku ?? DEFAULT_TIKU)
   const configPath = computed(() => view.value?.config_path ?? '')
   const home = computed(() => view.value?.home ?? '')
   const alertDays = computed(() => view.value?.ui?.alert_days ?? 3)
@@ -100,6 +109,7 @@ export const useSettingsStore = defineStore('settings', () => {
     checking,
     error,
     http,
+    tiku,
     configPath,
     home,
     alertDays,

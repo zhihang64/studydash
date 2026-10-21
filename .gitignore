@@ -25,6 +25,8 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+# pytest 在 Windows 上跑 --basetemp 时留下的临时根目录
+pytest-of-*/
 
 # ---- 编辑器 / 系统 ----
 .vscode/

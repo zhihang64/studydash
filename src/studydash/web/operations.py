@@ -16,7 +16,7 @@ from datetime import timedelta
 from typing import Any, Callable, Mapping
 
 from .. import mooclogin
-from ..aggregate import aggregate, build_payload
+from ..aggregate import aggregate, build_payload, sync_payload
 from ..http import HttpTrace
 from ..log import Log
 from ..login import Session
@@ -40,6 +40,10 @@ __all__ = [
 
 Runner = Callable[[AppState, Reporter, Mapping[str, Any]], dict[str, Any]]
 
+# 上报最多开几个线程。学习通对同一账号的并发请求不算宽容，超过这个数收益也归零
+# （瓶颈变成平台响应时间），所以给个硬上限，不让前端随便填。
+MAX_WRITEBACK_WORKERS = 8
+
 KINDS: tuple[str, ...] = (
     "login_qr",
     "login_password",
@@ -48,6 +52,9 @@ KINDS: tuple[str, ...] = (
     "login_live",
     "fetch",
     "probe",
+    "writeback",
+    "quiz",
+    "learning",
 )
 
 KIND_LABELS: dict[str, str] = {
@@ -58,6 +65,9 @@ KIND_LABELS: dict[str, str] = {
     "login_live": "打开浏览器登录",
     "fetch": "抓取学业数据",
     "probe": "只读探测平台接口",
+    "writeback": "上报视频观看时长",
+    "quiz": "章节测验答题",
+    "learning": "刷章节学习次数",
 }
 
 
@@ -75,6 +85,23 @@ def _as_float(value: Any, default: float) -> float:
 
 def _as_text(value: Any, default: str = "") -> str:
     return str(value).strip() if value is not None else default
+
+
+def _as_kinds(value: Any) -> list[str] | None:
+    """把前端传来的任务点种类规整成列表；空/没给返回 None（表示全都要）。
+
+    前端是复选框，可能给数组；命令行/接口调试也可能给 ``"video,read"`` 这样的串。
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(item) for item in value]
+    else:
+        return None
+    out = [item.strip().lower() for item in items if item.strip()]
+    return out or None
 
 
 def _require_login_support(platform: str) -> None:
@@ -461,6 +488,453 @@ def op_probe(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict
 
 
 # --------------------------------------------------------------------------- #
+# 写平台数据（唯一一处）
+# --------------------------------------------------------------------------- #
+
+def op_writeback(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict[str, Any]:
+    """把视频观看时长上报给学习通。
+
+    这是网页端唯一会写平台数据的任务：``options["apply"]`` 不为真时只演练，
+    与命令行 ``studydash writeback`` 共用 ``ChaoxingVideoWriter``，
+    所以两边的白名单、签名、判定标准完全一致。
+    """
+    from ..writeback import ChaoxingVideoWriter, WritebackError  # 只在用到时导入
+
+    platform = _as_text(options.get("platform"), "chaoxing") or "chaoxing"
+    if platform != "chaoxing":
+        raise ApiError(
+            "invalid_request",
+            f"目前只支持 chaoxing，收到 {platform!r}",
+            detail={"field": "platform", "available": ["chaoxing"]},
+        )
+
+    apply = bool(options.get("apply"))
+    paced = bool(options.get("paced"))
+    ramp = bool(options.get("ramp"))
+    limit = int(_as_float(options.get("limit"), 0.0))
+    interval = _as_float(options.get("interval"), 59.8)
+    needle = _as_text(options.get("course")).strip()
+    course_id = _as_text(options.get("course_id")).strip()
+    workers = int(_as_float(options.get("workers"), 1.0))
+    if workers < 1:
+        workers = 1
+    if workers > MAX_WRITEBACK_WORKERS:
+        workers = MAX_WRITEBACK_WORKERS
+    kinds = _as_kinds(options.get("kinds"))
+
+    cfg = state.config()
+    account = next((a for a in cfg.accounts if a.platform == platform), None)
+    if account is None:
+        raise ApiError(
+            "invalid_request",
+            f"配置里没有 {platform} 账号",
+            hint="先去「账号」页绑一个，再回来上报。",
+        )
+    if not account.cookie.strip():
+        raise ApiError(
+            "auth_error",
+            f"{platform} 账号的 Cookie 是空的",
+            hint="先去「账号」页扫码登录。",
+        )
+
+    if not apply:
+        rep.log("warn", "演练模式：不会向平台发出任何上报。勾上「真的上报」才会写。")
+    if paced and not apply:
+        rep.log("info", "演练模式下逐分钟上报只影响预估次数，不会真的等。")
+
+    rep.progress(0.05, f"读取 {platform} 课程与章节")
+    courses, _ = aggregate(cfg, log=_task_log(rep), only=[platform])
+    # 课程卡上的那个按钮传 course_id，精确锁死一门课；面板里的模糊搜索走 needle。
+    if course_id:
+        courses = [c for c in courses if str(c.id) == course_id]
+    elif needle:
+        courses = [c for c in courses if needle.lower() in (c.name or "").lower()]
+    if not courses:
+        rep.log("warn", "没有可处理的课程（Cookie 过期或还没选课？）")
+        return {"platform": platform, "applied": False, "targets": [], "counts": _empty_counts()}
+
+    def _sleep(seconds: float) -> None:
+        # 逐分钟上报一跑就是几十分钟，中间必须能取消。
+        rep.check_cancelled()
+        time.sleep(seconds)
+
+    rep.progress(0.15, "逐个任务点上报")
+    writer = ChaoxingVideoWriter(
+        account,
+        cfg.http,
+        log=_task_log(rep),
+        apply=apply,
+        sleep=_sleep,
+        interval=interval,
+        force=bool(options.get("force")),
+    )
+    if not writer.user_id:
+        rep.log("warn", "Cookie 里没有 _uid，签名拼不出来，上报会被平台拒绝")
+
+    def _mission() -> dict[str, dict[str, Any]]:
+        """课程页上的「已完成任务点 X/Y」——唯一能证明上报真生效的判据。"""
+        out: dict[str, dict[str, Any]] = {}
+        for one in courses[:5]:
+            got = writer.mission_counts(one)
+            if got:
+                out[str(one.id)] = {"name": one.name, "done": got[0], "total": got[1]}
+        return out
+
+    mission_before = _mission()
+    if mission_before:
+        line = "；".join(
+            f"{v['name']} {v['done']}/{v['total']}" for v in mission_before.values()
+        )
+        rep.log("info", f"上报前的已完成任务点：{line}")
+
+    # 先清点，才知道进度条的分母；plan() 只读，不会发出上报。
+    rep.progress(0.15, "清点任务点")
+    todo = writer.plan(courses, limit=limit, kinds=kinds)
+    total = len(todo)
+    if total:
+        rep.log("info", f"共 {total} 个任务点待上报")
+    else:
+        rep.log("warn", "没找到任何待上报的任务点")
+    # 平台那个「已完成任务点 X/Y」把章节测验也算进去了，我们只做六类任务点。
+    # 不把这个差说清楚，用户只会看到「报完了还是 0」。
+    unsupported = {k: dict(v) for k, v in writer.unsupported.items() if v}
+    if unsupported:
+        parts: list[str] = []
+        for bucket in unsupported.values():
+            parts.extend(f"{label} {count} 个" for label, count in bucket.items())
+        rep.log(
+            "warn",
+            "另有 " + "、".join(parts) + " 任务点本工具不做（章节测验要题库、讨论/考试要人工），"
+            "平台的任务点总数里包含它们",
+        )
+
+    def _on_step(done: int, count: int, target: Any) -> None:
+        # 0.15 起步，0.90 收尾，剩下的留给汇总。
+        rep.check_cancelled()
+        span = (done / count) if count else 1.0
+        rep.progress(0.15 + 0.75 * span, f"第 {done}/{count} 个：{target.label}")
+
+    if workers > 1:
+        rep.log("info", f"并发上报：{workers} 个线程同时推进")
+    try:
+        results = writer.run(
+            courses,
+            limit=limit,
+            paced=paced,
+            ramp=ramp,
+            on_step=_on_step,
+            work=todo,
+            workers=workers,
+            kinds=kinds,
+        )
+    except WritebackError as exc:
+        raise ApiError("provider_error", str(exc), hint=exc.hint) from exc
+
+    counts = {
+        "total": len(results),
+        "done": sum(1 for r in results if r.get("ok") is True),
+        "failed": sum(1 for r in results if r.get("ok") is False),
+        "skipped": sum(1 for r in results if r.get("ok") is None),
+        "stuck": sum(1 for r in results if r.get("status") == "stuck"),
+        "unsupported": sum(sum(b.values()) for b in unsupported.values()),
+        "requests": sum(int(r.get("requests") or 0) for r in results),
+    }
+    rep.progress(0.98, "汇总")
+    mission_after = _mission()
+    if mission_before and mission_after:
+        for key, before in mission_before.items():
+            after = mission_after.get(key)
+            if not after:
+                continue
+            gain = after["done"] - before["done"]
+            rep.log(
+                "ok" if gain > 0 else "info",
+                f"{before['name']}：已完成任务点 {before['done']} → {after['done']}"
+                f" / {after['total']}（{gain:+d}）"
+                + ("" if gain > 0 else "（平台计数滞后几十秒，隔会儿再查）"),
+            )
+    # 报完了看板还是旧数字，是因为 data/progress.json 只有 fetch 会重写。这里用
+    # 刚刚活读到的计数器就地改对：一次额外请求都不用发，看板立刻就是新数字。
+    sync: dict[str, Any] | None = None
+    if apply and counts["done"] and mission_after:
+        rep.progress(0.99, "同步看板数据")
+        sync = _sync_dashboard(state, mission_after, platform=platform, rep=rep)
+
+    verb = "已上报" if apply else "演练通过"
+    if not results:
+        rep.log("warn", "没找到任何待上报的任务点")
+        rep.log("info", "可能是：章节页没有任务点节点、任务点已全部完成、或 Cookie 已过期。")
+    elif counts["failed"]:
+        rep.log("warn", f"{verb} {counts['done']} 个，未通过 {counts['failed']} 个")
+        if counts["stuck"]:
+            rep.log(
+                "warn",
+                f"其中 {counts['stuck']} 个的播放位置早就满了却没判通过（平台死态），"
+                "再发请求也不会变，只能手动重看或找老师重置",
+            )
+    else:
+        rep.log("ok", f"{verb} {counts['done']} 个任务点，发出 {counts['requests']} 次请求")
+
+    return {
+        "platform": platform,
+        "applied": apply,
+        "paced": paced,
+        "ramp": ramp,
+        "counts": counts,
+        "mission": {"before": mission_before, "after": mission_after},
+        "unsupported": unsupported,
+        "sync": sync,
+        "targets": results[-200:],
+    }
+
+
+def _sync_dashboard(
+    state: AppState,
+    mission: Mapping[str, Mapping[str, Any]],
+    *,
+    platform: str,
+    rep: Reporter,
+) -> dict[str, Any] | None:
+    """把上报后的任务点计数写回 ``data/progress.json``，看板不用等下一次抓取。
+
+    只在真的写了平台（``apply``）且至少有一个任务点通过时调用；读不出来、写不进去
+    都只记一条日志，绝不让同步失败把「已经上报成功」这件事变成任务失败。
+    """
+    try:
+        payload = state.workspace.load_progress()
+    except (OSError, ValueError) as exc:
+        rep.log("warn", f"看板数据读不出来，跳过同步：{exc}")
+        return None
+    if not payload:
+        rep.log("info", "还没有看板数据（没抓取过），跳过同步")
+        return None
+    touched = sync_payload(payload, mission, platform=platform)
+    if not touched:
+        return None
+    try:
+        state.workspace.save_progress(payload)
+    except OSError as exc:
+        rep.log("warn", f"看板数据写不进去，跳过同步：{exc}")
+        return None
+    overview = payload.get("overview") or {}
+    avg = overview.get("avg_progress", 0) or 0
+    rep.log(
+        "ok",
+        f"看板已同步：{touched} 门课的任务点进度按平台读数更新"
+        f"（平均 {float(avg) * 100:.1f}%）",
+    )
+    return {"courses": touched, "avg_progress": avg}
+
+
+def _chaoxing_account(cfg: Any, platform: str) -> AccountConfig:
+    """取学习通账号；缺账号或 Cookie 空了就抛带指引的 ApiError。"""
+    if platform != "chaoxing":
+        raise ApiError(
+            "invalid_request",
+            f"目前只支持 chaoxing，收到 {platform!r}",
+            detail={"field": "platform", "available": ["chaoxing"]},
+        )
+    account = next((a for a in cfg.accounts if a.platform == platform), None)
+    if account is None:
+        raise ApiError(
+            "invalid_request",
+            f"配置里没有 {platform} 账号",
+            hint="先去「账号」页绑一个，再回来。",
+        )
+    if not account.cookie.strip():
+        raise ApiError(
+            "auth_error",
+            f"{platform} 账号的 Cookie 是空的",
+            hint="先去「账号」页扫码登录。",
+        )
+    return account
+
+
+def _pick_courses(courses: list[Any], *, course_id: str, needle: str) -> list[Any]:
+    """课程卡按钮传 course_id 精确锁课；面板里的搜索框走模糊匹配。"""
+    if course_id:
+        return [c for c in courses if str(c.id) == course_id]
+    if needle:
+        return [c for c in courses if needle.lower() in (c.name or "").lower()]
+    return courses
+
+
+def op_quiz(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict[str, Any]:
+    """把章节测验做掉（题库查答案 → 覆盖率够就交卷）。
+
+    默认演练：``apply`` 不为真时只清点「哪门课几道题、题库能覆盖几道」，
+    连交卷接口都不会碰。
+    """
+    from ..quiz import QuizRunner  # 只在用到时导入
+
+    platform = _as_text(options.get("platform"), "chaoxing") or "chaoxing"
+    apply = bool(options.get("apply"))
+    limit = int(_as_float(options.get("limit"), 0.0))
+    cfg = state.config()
+    account = _chaoxing_account(cfg, platform)
+
+    cover_rate = _as_float(options.get("cover_rate"), cfg.tiku.cover_rate)
+    tiku = cfg.tiku.client(log=lambda msg: rep.log("debug", msg))
+    if tiku is None:
+        rep.log(
+            "warn",
+            "没配题库 token：只能把测验列出来，一道也答不了。去「设置」页填题库 token。",
+        )
+    if not apply:
+        rep.log("warn", "演练模式：不会交卷。勾上「真的提交」才会作答并交卷。")
+
+    rep.progress(0.05, f"读取 {platform} 课程与章节")
+    courses, _ = aggregate(cfg, log=_task_log(rep), only=[platform])
+    courses = _pick_courses(
+        courses,
+        course_id=_as_text(options.get("course_id")).strip(),
+        needle=_as_text(options.get("course")).strip(),
+    )
+    if not courses:
+        rep.log("warn", "没有可处理的课程（Cookie 过期或还没选课？）")
+        return {"platform": platform, "applied": apply, "counts": _empty_counts(), "targets": []}
+
+    runner = QuizRunner(
+        account,
+        cfg.http,
+        log=_task_log(rep),
+        apply=apply,
+        tiku=tiku,
+        cover_rate=cover_rate,
+    )
+
+    rep.progress(0.2, "清点章节测验")
+    todo = runner.plan(courses, limit=limit)
+    total = len(todo)
+    if total:
+        rep.log("info", f"共 {total} 个章节测验")
+    else:
+        rep.log("warn", "没找到章节测验")
+
+    results: list[dict[str, Any]] = []
+    for index, (_course, target) in enumerate(todo, start=1):
+        rep.check_cancelled()
+        rep.progress(0.2 + 0.72 * (index - 1) / max(total, 1), f"第 {index}/{total} 份：{target.label}")
+        results.append(runner.solve(target))
+
+    counts = {
+        "total": len(results),
+        "done": sum(1 for r in results if r.get("ok") is True),
+        "failed": sum(1 for r in results if r.get("ok") is False),
+        "skipped": sum(1 for r in results if r.get("ok") is None),
+        "questions": sum(int(r.get("total") or 0) for r in results),
+        "answered": sum(int(r.get("answered") or 0) for r in results),
+        "requests": sum(int(r.get("requests") or 0) for r in results),
+    }
+    rep.progress(0.98, "汇总")
+    if not results:
+        rep.log("warn", "没有可做的章节测验")
+    elif not apply:
+        rep.log(
+            "ok",
+            f"演练通过：{counts['total']} 份测验，{counts['questions']} 道题，"
+            f"题库覆盖 {counts['answered']} 道",
+        )
+    elif counts["failed"]:
+        rep.log("warn", f"已交卷 {counts['done']} 份，未通过 {counts['failed']} 份")
+    else:
+        rep.log("ok", f"已交卷 {counts['done']} 份测验，发出 {counts['requests']} 次请求")
+    return {
+        "platform": platform,
+        "applied": apply,
+        "cover_rate": cover_rate,
+        "tiku": bool(tiku),
+        "counts": counts,
+        "targets": results[-200:],
+    }
+
+
+def op_learning(state: AppState, rep: Reporter, options: Mapping[str, Any]) -> dict[str, Any]:
+    """刷章节学习次数。
+
+    计数由服务端按时间窗口算：访问 → 计次 → 心跳 → 等 30 秒 → 心跳，一轮约 30 秒，
+    所以串行、慢、没有捷径。默认演练：只报「几个章节 × 几轮 ≈ 多久」。
+    """
+    from ..learning import HEARTBEAT_WAIT, LearningCounter
+
+    platform = _as_text(options.get("platform"), "chaoxing") or "chaoxing"
+    apply = bool(options.get("apply"))
+    limit = int(_as_float(options.get("limit"), 0.0))
+    times = max(1, int(_as_float(options.get("times"), 1.0)))
+    cfg = state.config()
+    account = _chaoxing_account(cfg, platform)
+    if not apply:
+        rep.log("warn", "演练模式：不会真的访问章节。勾上「真的去刷」才会请求平台。")
+
+    rep.progress(0.05, f"读取 {platform} 课程与章节")
+    courses, _ = aggregate(cfg, log=_task_log(rep), only=[platform])
+    courses = _pick_courses(
+        courses,
+        course_id=_as_text(options.get("course_id")).strip(),
+        needle=_as_text(options.get("course")).strip(),
+    )
+    if not courses:
+        rep.log("warn", "没有可处理的课程（Cookie 过期或还没选课？）")
+        return {"platform": platform, "applied": apply, "counts": _empty_counts(), "targets": []}
+
+    counter = LearningCounter(account, cfg.http, log=_task_log(rep), apply=apply)
+
+    rep.progress(0.2, "清点章节")
+    todo = counter.plan(courses, limit=limit)
+    if todo:
+        estimate = len(todo) * times * HEARTBEAT_WAIT
+        rep.log(
+            "info",
+            f"共 {len(todo)} 个章节，刷 {times} 轮，"
+            f"每轮等 {HEARTBEAT_WAIT:.0f} 秒心跳 ⇒ 预计 {estimate / 60:.0f} 分钟",
+        )
+    else:
+        rep.log("warn", "没找到任何章节")
+
+    def _on_step(done: int, count: int, target: Any) -> None:
+        rep.check_cancelled()
+        rep.progress(0.2 + 0.74 * (done / count if count else 1.0), f"第 {done}/{count} 次：{target.label}")
+
+    results = counter.run(courses, times=times, limit=limit, on_step=_on_step, work=todo)
+
+    counts = {
+        "total": len(results),
+        "done": sum(1 for r in results if r.get("ok") is True),
+        "failed": sum(1 for r in results if r.get("ok") is False),
+        "skipped": sum(1 for r in results if r.get("ok") is None),
+        "requests": sum(int(r.get("requests") or 0) for r in results),
+    }
+    rep.progress(0.98, "汇总")
+    if not results:
+        rep.log("warn", "没有可刷的章节")
+    elif not apply:
+        rep.log("ok", f"演练通过：{counts['total']} 次访问（{len(todo)} 章节 × {times} 轮）")
+    elif counts["failed"]:
+        rep.log("warn", f"已刷 {counts['done']} 次，失败 {counts['failed']} 次")
+    else:
+        rep.log("ok", f"已刷 {counts['done']} 次，发出 {counts['requests']} 次请求")
+    return {
+        "platform": platform,
+        "applied": apply,
+        "times": times,
+        "counts": counts,
+        "targets": results[-200:],
+    }
+
+
+def _empty_counts() -> dict[str, int]:
+    return {
+        "total": 0,
+        "done": 0,
+        "failed": 0,
+        "skipped": 0,
+        "stuck": 0,
+        "unsupported": 0,
+        "requests": 0,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # 注册表
 # --------------------------------------------------------------------------- #
 
@@ -472,6 +946,9 @@ OPERATIONS: dict[str, Runner] = {
     "login_live": op_login_live,
     "fetch": op_fetch,
     "probe": op_probe,
+    "writeback": op_writeback,
+    "quiz": op_quiz,
+    "learning": op_learning,
 }
 
 

@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Iterable, Mapping
+from typing import Any, Callable, ClassVar, Iterable, Mapping, TypeVar
 
 from ..http import DEFAULT_UA, HttpClient, HttpTrace
 from ..log import Log
@@ -38,6 +40,9 @@ __all__ = [
     "login_page_evidence",
     "REGISTRY",
     "register",
+    "FETCH_WORKERS_MIN",
+    "FETCH_WORKERS_MAX",
+    "map_concurrent",
 ]
 
 #: 判定「这是登录页」的结构证据：同一组里的特征**同时**出现才算命中。
@@ -154,6 +159,66 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+#: 抓取并发度的上下界。上限 8 是因为每个工作线程一份 HttpClient + 一条长连接，
+#: 再多收益全被超星的连接排队吃掉（实测 4 线程后 request 中位数开始上升）。
+FETCH_WORKERS_MIN = 1
+FETCH_WORKERS_MAX = 8
+
+
+def _clamp_workers(value: int) -> int:
+    return max(FETCH_WORKERS_MIN, min(FETCH_WORKERS_MAX, value))
+
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def map_concurrent(
+    func: Callable[[T], R],
+    items: Iterable[T],
+    *,
+    workers: int,
+    on_error: Callable[[T, BaseException], None] | None = None,
+) -> list[R | None]:
+    """按原顺序返回 ``func(item)`` 的结果，``workers > 1`` 时并发跑。
+
+    刻意手写而不是直接 ``executor.map``：``executor.map`` 一遇到异常就在
+    迭代结果那一刻抛出，后面已完成的结果全丢；这里把异常收进 ``on_error``
+    并把该位置填 ``None``，调用方拿到的是「长度与原序列一致、顺序一致」的列表。
+    这样并发化和串行版本的行为边界完全一样——单点失败只影响那一个元素。
+
+    ``workers <= 1`` 时就是纯串行（同一线程、同一份 HttpClient），保证
+    单测里 monkeypatch ``self.http.get_text`` 仍然生效。
+    """
+    seq = list(items)
+    if not seq:
+        return []
+    n = _clamp_workers(int(workers or 1))
+    if n <= 1 or len(seq) == 1:
+        out: list[R | None] = []
+        for item in seq:
+            try:
+                out.append(func(item))
+            except BaseException as exc:
+                if on_error is None:
+                    raise
+                on_error(item, exc)
+                out.append(None)
+        return out
+
+    results: list[R | None] = [None] * len(seq)
+    with ThreadPoolExecutor(max_workers=n, thread_name_prefix="studydash-fetch") as pool:
+        futures = {pool.submit(func, item): idx for idx, item in enumerate(seq)}
+        for future, idx in futures.items():
+            try:
+                results[idx] = future.result()
+            except BaseException as exc:
+                if on_error is None:
+                    raise
+                on_error(seq[idx], exc)
+    return results
+
+
 @dataclass(frozen=True)
 class ProviderMeta:
     """适配器的静态自我介绍。``status`` 与 ``verified`` 是给用户看的诚实标签。"""
@@ -221,6 +286,15 @@ class HttpSettings:
     delay: float = 0.4
     user_agent: str = DEFAULT_UA
     retries: int = 2
+    #: 抓取层的并发度。1 = 串行（旧行为）；>1 时账号之间、以及同一账号下的
+    #: 课程页/作业详情各自并发抓。每个工作线程一份 HttpClient，所以 ``delay``
+    #: 是「每线程」的间隔，整体请求速率约等于 ``fetch_workers / delay``。
+    fetch_workers: int = 1
+
+    def __post_init__(self) -> None:
+        # 直接构造也要夹紧：不然 ``HttpSettings(fetch_workers=0)`` 会在别处
+        # 悄悄退化成「一个线程也不开」，比抛异常更难看懂。
+        self.fetch_workers = _clamp_workers(int(self.fetch_workers or 1))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "HttpSettings":
@@ -230,6 +304,7 @@ class HttpSettings:
             delay=_as_float(data.get("delay"), 0.4),
             user_agent=str(data.get("user_agent") or DEFAULT_UA),
             retries=_as_int(data.get("retries"), 2),
+            fetch_workers=_clamp_workers(_as_int(data.get("fetch_workers"), 1)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -238,6 +313,7 @@ class HttpSettings:
             "delay": self.delay,
             "user_agent": self.user_agent,
             "retries": self.retries,
+            "fetch_workers": self.fetch_workers,
         }
 
 
@@ -333,6 +409,8 @@ class Provider(ABC):
         self.settings = settings or HttpSettings()
         self.log = log or Log(quiet=True)
         kwargs = dict(self.client_kwargs())
+        self._owner = threading.get_ident()
+        self._local = threading.local()
         self.http = HttpClient(
             cookie=self.account.cookie,
             timeout=self.settings.timeout,
@@ -341,6 +419,53 @@ class Provider(ABC):
             retries=self.settings.retries,
             logger=self.log.debug,
             **kwargs,
+        )
+
+    # -- 线程隔离的 HTTP 出口 ---------------------------------------------- #
+
+    def _client(self) -> HttpClient:
+        """当前线程该用的 :class:`HttpClient`。
+
+        构造这个 provider 的线程（单测里就是主线程）继续用它自己的
+        ``self.http``——那些 ``provider.http.get_text = fake`` 的 monkeypatch
+        因此照旧生效；工作线程各自新建一份，免得共享 ``CookieJar``、限速标记
+        与 trace 列表（三者都不是线程安全的，共享还会把并发退化成串行）。
+        """
+        if threading.get_ident() == self._owner:
+            return self.http
+        client = getattr(self._local, "http", None)
+        if client is None:
+            client = HttpClient(
+                cookie=self.account.cookie,
+                timeout=self.settings.timeout,
+                delay=self.settings.delay,
+                user_agent=self.settings.user_agent,
+                retries=self.settings.retries,
+                logger=self.log.debug,
+                **dict(self.client_kwargs()),
+            )
+            self._local.http = client
+        return client
+
+    @property
+    def fetch_workers(self) -> int:
+        """抓取层并发度，来自 ``http.fetch_workers`` 配置。"""
+        return _clamp_workers(int(getattr(self.settings, "fetch_workers", 1) or 1))
+
+    def map_concurrent(
+        self,
+        func: Callable[[T], R],
+        items: Iterable[T],
+        *,
+        on_error: Callable[[T, BaseException], None] | None = None,
+        workers: int | None = None,
+    ) -> list[R | None]:
+        """``map_concurrent`` 的实例版，默认用本账号的 ``fetch_workers``。"""
+        return map_concurrent(
+            func,
+            items,
+            workers=self.fetch_workers if workers is None else workers,
+            on_error=on_error,
         )
 
     # -- 需要子类实现 ------------------------------------------------------ #

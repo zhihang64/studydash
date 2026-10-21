@@ -21,19 +21,29 @@ const session = useSessionStore()
 const timeout = ref(8)
 const delay = ref(0.4)
 const retries = ref(2)
+const fetchWorkers = ref(1)
 const userAgent = ref('')
 const alertDays = ref(3)
 const keepRaw = ref(true)
+// 题库：token 留空表示「不改」，只有真输了新 token 才算脏
+const tikuToken = ref('')
+const tikuApi = ref('https://tk.enncy.cn/query')
+const tikuCoverRate = ref(0.8)
 
 const themes: ThemeChoice[] = ['auto', 'light', 'dark']
 
 const dirty = computed(() => {
   const http = settings.http
+  const tiku = settings.tiku
   return (
     timeout.value !== http.timeout ||
     delay.value !== http.delay ||
     retries.value !== http.retries ||
+    fetchWorkers.value !== http.fetch_workers ||
     userAgent.value !== http.user_agent ||
+    tikuToken.value.trim() !== '' ||
+    tikuApi.value !== tiku.api ||
+    tikuCoverRate.value !== tiku.cover_rate ||
     alertDays.value !== settings.alertDays ||
     keepRaw.value !== (settings.view?.keep_raw ?? true)
   )
@@ -41,10 +51,15 @@ const dirty = computed(() => {
 
 function syncFromStore(): void {
   const http = settings.http
+  const tiku = settings.tiku
   timeout.value = http.timeout
   delay.value = http.delay
   retries.value = http.retries
+  fetchWorkers.value = http.fetch_workers ?? 1
   userAgent.value = http.user_agent
+  tikuToken.value = ''
+  tikuApi.value = tiku.api
+  tikuCoverRate.value = tiku.cover_rate
   alertDays.value = settings.alertDays
   keepRaw.value = settings.view?.keep_raw ?? true
 }
@@ -58,18 +73,28 @@ async function pickTheme(value: ThemeChoice): Promise<void> {
 }
 
 async function saveAll(): Promise<void> {
+  const token = tikuToken.value.trim()
   const ok = await settings.save({
     http: {
       timeout: Number(timeout.value),
       delay: Number(delay.value),
       retries: Number(retries.value),
+      fetch_workers: Number(fetchWorkers.value),
       user_agent: userAgent.value.trim(),
+    },
+    // token 留空 = 保持服务端已存的那个，别拿空串把它清掉
+    tiku: {
+      api: tikuApi.value.trim(),
+      cover_rate: Number(tikuCoverRate.value),
+      ...(token ? { token } : {}),
     },
     ui: { theme: themeChoice.value, alert_days: Number(alertDays.value) },
     keep_raw: keepRaw.value,
   })
-  if (ok) toast.ok('设置已保存', '下次抓取就会用新的参数。')
-  else toast.error('保存失败', settings.error)
+  if (ok) {
+    tikuToken.value = ''
+    toast.ok('设置已保存', '下次抓取就会用新的参数。')
+  } else toast.error('保存失败', settings.error)
 }
 
 function revert(): void {
@@ -159,6 +184,22 @@ onMounted(() => {
         </div>
 
         <div class="field">
+          <label class="label" for="set-workers">抓取并发数</label>
+          <input
+            id="set-workers"
+            v-model.number="fetchWorkers"
+            class="input"
+            type="number"
+            min="1"
+            max="8"
+            step="1"
+          />
+          <p class="help">
+            同时抓几路。1 是老实排队；调到 4 能快两三倍，代价是请求更密集、更容易被平台限速。
+          </p>
+        </div>
+
+        <div class="field">
           <label class="label" for="set-alert">提前预警天数</label>
           <input id="set-alert" v-model.number="alertDays" class="input" type="number" min="0" max="30" step="1" />
           <p class="help">距截止还有几天时开始标红。影响时间线的分组和总览的「即将到期」。</p>
@@ -179,6 +220,71 @@ onMounted(() => {
         </button>
         <button type="button" class="btn" :disabled="!dirty" @click="revert">放弃改动</button>
         <span v-if="dirty" class="pill pill--warn">有未保存的改动</span>
+      </div>
+    </section>
+
+    <!-- ------------------------------ 题库 ------------------------------ -->
+
+    <section class="card" aria-labelledby="tiku-title">
+      <header class="card__head">
+        <h2 id="tiku-title" class="card__title">
+          题库
+          <span class="card__hint">章节测验自动答题用，不填就只能手动做</span>
+        </h2>
+      </header>
+
+      <div class="form">
+        <div class="field field--wide">
+          <label class="label" for="set-tiku-token">题库 token</label>
+          <input
+            id="set-tiku-token"
+            v-model="tikuToken"
+            class="input mono"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            :placeholder="settings.tiku.token_set ? `已配置（${settings.tiku.token}），留空不改` : '未配置'"
+          />
+          <p class="help">
+            题库服务里查到的那串 token。保存在本机配置文件里，接口回读时是打码的；留空表示不改。
+          </p>
+        </div>
+
+        <div class="field field--wide">
+          <label class="label" for="set-tiku-api">题库接口</label>
+          <input
+            id="set-tiku-api"
+            v-model="tikuApi"
+            class="input mono"
+            type="url"
+            spellcheck="false"
+          />
+          <p class="help">默认言溪题库。换别家只要接口兼容「问题进、答案出」就能用。</p>
+        </div>
+
+        <div class="field">
+          <label class="label" for="set-tiku-cover">最低覆盖率</label>
+          <input
+            id="set-tiku-cover"
+            v-model.number="tikuCoverRate"
+            class="input"
+            type="number"
+            min="0"
+            max="1"
+            step="0.05"
+          />
+          <p class="help">
+            题库答上来的比例低于这个值就只保存、不交卷。默认 0.8 —— 硬交低分卷子会把这个测验记
+            成低分，比不交更糟。
+          </p>
+        </div>
+      </div>
+
+      <div class="row actions">
+        <button type="button" class="btn btn--primary" :disabled="!dirty || settings.saving" @click="saveAll">
+          {{ settings.saving ? '保存中…' : '保存设置' }}
+        </button>
+        <button type="button" class="btn" :disabled="!dirty" @click="revert">放弃改动</button>
       </div>
     </section>
 

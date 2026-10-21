@@ -12,6 +12,7 @@ from ... import __version__
 from ... import diagnostics, login
 from ...model import SCHEMA_VERSION
 from ...providers import HttpSettings, discover, metas
+from ...tiku import TikuSettings
 from .. import operations
 from ..state import AppState
 from .deps import get_state, settings_view
@@ -64,8 +65,13 @@ def read_settings(state: AppState = Depends(get_state)) -> dict[str, Any]:
 class SettingsPatch(BaseModel):
     """局部更新。只给想改的字段，其余保持不动。"""
 
-    http: dict[str, Any] | None = Field(default=None, description="timeout / delay / retries / user_agent")
+    http: dict[str, Any] | None = Field(
+        default=None, description="timeout / delay / retries / user_agent / fetch_workers"
+    )
     ui: dict[str, Any] | None = Field(default=None, description="theme / alert_days")
+    tiku: dict[str, Any] | None = Field(
+        default=None, description="token / api / cover_rate（题库，章节测验答题用）"
+    )
     keep_raw: bool | None = None
 
 
@@ -76,6 +82,10 @@ def patch_settings(patch: SettingsPatch, state: AppState = Depends(get_state)) -
         merged = config.http.to_dict()
         merged.update({k: v for k, v in patch.http.items() if v is not None})
         config.http = HttpSettings.from_dict(merged)
+    if patch.tiku:
+        merged_tiku = config.tiku.to_dict()
+        merged_tiku.update({k: v for k, v in patch.tiku.items() if v is not None})
+        config.tiku = TikuSettings.from_dict(merged_tiku)
     if patch.ui:
         config.ui.update({k: v for k, v in patch.ui.items() if v is not None})
     if patch.keep_raw is not None:

@@ -52,7 +52,7 @@ update|modify|doWork|doHomeWork|finish|report|sign|checkin|submitWork` 直接拒
 | 手动导入 / 内置样例 | ✅ stable | `manual` / `demo` 适配器 |
 | 隐藏课程（二级页「已隐藏课程」） | ✅ | 真数据工作区实测 34→33 门，见 §4.8 |
 | 网页版六个页面（含二级页） | ✅ | headless Edge 截图逐页看过 |
-| 命令行全部子命令 | ✅ | 562 例测试 |
+| 命令行全部子命令 | ✅ | 532 例测试（writeback 除外：它只演练过，没有真账号 --apply） |
 
 **端到端真实验证过的平台是超星、中国大学 MOOC 和头歌**（后两个标 `beta`，不是
 `stable`：MOOC 的两个 RPC、头歌的三个接口都只用过一个真账号验过）。智慧树的
@@ -78,6 +78,7 @@ src/studydash/
 ├── login.py               Cookie 归一化、六种来源、登录态判定（L47 LOGIN_CHECK）
 ├── browsers.py            Chromium 系 Cookie 库直读（DPAPI + AES-GCM）
 ├── cdp.py                 纯 stdlib DevTools 客户端（裸 socket 手写 WebSocket 帧）
+├── writeback.py           任务点上报（唯一写操作，只在 --apply 或网页点确认时跑）
 ├── passlogin.py           账号密码登录（AES-128-CBC）
 ├── qrlogin.py + qr.py + aes.py   超星扫码登录 + 自写 PNG 解码/二维码点阵还原
 ├── mooclogin.py           中国大学 MOOC 扫码登录（icourse163 自己的协议）
@@ -86,6 +87,7 @@ src/studydash/
 ├── providers/
 │   ├── base.py            REGISTRY/register、ProviderMeta、Provider 基类、AccountConfig
 │   ├── chaoxing.py        ★ 主力适配器，进度解析全在这
+│   ├── chaoxing_stat.py   stat2-ans 只读补充源：学习次数/累计时长/任务点明细，未验证
 │   ├── icourse163.py      ★ RPC 适配器，课程/进度/作业已真账号验证（beta）
 │   ├── educoder.py        ★ 头歌：GET + PC 端签名，课程/实训/图文作业已验证（beta）
 │   ├── zhihuishu.py       RPC 风格，未验证
@@ -104,7 +106,7 @@ src/studydash/
     └── static/            ★ 前端构建产物，必须进仓库
 
 web/                       前端源码（含二级页 HiddenView）
-tests/                     562 例
+tests/                     535 例
 tools/                     build_exe.ps1 / build_web.ps1 / make_icon.py / entry.py
 docs/web-api.md            网页版 API 契约（冻结）
 docs/plugin.md             写自己的适配器
@@ -426,6 +428,39 @@ docs/plugin.md             写自己的适配器
 
 ---
 
+### 4.9 上报音视频：一次跳满会造死态（2026-10 真机对照）
+
+- 一次性把 `playing_time` 送到片尾（`attDuration * 1000`）是**最差**的做法：实测 5 个
+  未开始视频，平台只认 1 个 `isPassed=true`，另外 4 个原样返回 `isPassed=false`，同时
+  节点被写上 `videoFaceCaptureEnc`、`playTime` 已满 —— 这种组合再也不会变成完成态，
+  属于不可逆死态（石文化 265948593 的 88 个视频全是这么来的，任何 HTTP 变体都推不动）。
+- 正确姿势是**递进上报**：`RAMP_STEPS = (0.3, 0.7, 1.0)`，三个请求分别把播放位置送到
+  30% / 70% / 100%，间隔 `ramp_delay`（默认 1.5 秒，`--ramp-delay` 可调）。同样 4 个任务点
+  4 个全过，课程页「已完成任务点」计数真涨。
+- 判定口径仍然只有两个可信：单次回包的 `isPassed`，和课程页
+  `已完成任务点: <span>N</span> / M` 计数器（`RE_MISSION`）。**卡片 JSON 回读是缓存**，
+  上报后重抓同一章仍返回 `playTime: null`，不能用来验证成败。
+- 代码位置：`src/studydash/writeback.py` 的 `RAMP_STEPS` / `RAMP_DELAY` /
+  `ChaoxingVideoWriter._report_ramp`；`report(target, *, paced=False, ramp=False)`；
+
+### 4.10 刷完看板自动跟上（不再需要手动抓取）
+
+- 病状：上报完看板数字不动。原因是 `data/progress.json` 只有 `op_fetch` 会重写，
+  `op_writeback` 只写平台、不碰 payload；前端 `refreshAfter()` 重读的是同一份旧文件。
+- 修法：`src/studydash/aggregate.py` 新增 `sync_payload(payload, mission, *, platform="")`。
+  `mission` 是刚活读的 `{course_id: {"done":..,"total":..}}`（来自
+  `writeback.mission_counts()`），就地改 `progress`、`progress_parts[任务点].{done,ratio}`、
+  「pending_points」，然后调 `_recount_overview()` / `_recount_platforms()` 重算均值。
+- 铁纪律：**只改真动过的课**。`op_writeback` 下载 payload 后先 `sync_payload`，
+  再用 `state.workspace.save_progress()` 落盘；不重建整份 payload（那会把别平台
+  的数据覆盖掉）。
+- 开关：CLI `--no-sync`；`options['sync']` 默认 true。返回体 `sync` 字段；
+  前端 `describeResult()` 见 `result.sync` 就拼「看板已同步」。
+- 注意：平台「已完成任务点」计数器异步落库，上报后几十秒内读到的可能还是旧值；
+  不要把它当成上报失败，隔会儿再刷新一次页面。
+  `run(..., ramp=)`。网页端默认开（`CourseCard.vue` 的 `ramp` 与 `WritebackPanel.vue`
+  的「递进上报」复选框），CLI 需显式 `--ramp`。
+
 ## 5. 本地开发环境（照抄即可）
 
 ```powershell
@@ -435,7 +470,7 @@ $env:PYTHONUTF8='1'
 $env:PYTHONPATH="$PWD\src"      # 系统 python 没装 studydash，必须给
 $env:STUDYDASH_NO_GUI='1'       # 否则崩溃上报会弹 MessageBox 卡住测试
 
-python -m pytest -q             # 562 passed，约 6 秒
+python -m pytest -q             # 532 passed / 3 skipped，约 4 秒
 ```
 
 前端改动后**必须重建**，否则页面还是旧产物：
@@ -480,11 +515,34 @@ $out = 'D:\DSH chat\studydash\data\shot.png'
 
 ---
 
+## 5b. 章节测验答题 / 刷学习次数
+
+- `src/studydash/quiz.py`：「哪些节点是测验」只看 `node["type"] == "workid"`
+  （`writeback.py` 的映射表里 `workid -> 章节测验`），别用标题关键词匹配。
+  `iter_targets(course)` 收**单门课**，`plan(courses)` 收列表并返回 `[(Course, QuizTarget)]`。
+- 交卷表单除了原页面所有 hidden input，还要带 `answer{题号}` / `answertype{题号}` /
+  `answerwqbid="id1,id2,"` / `pyFlag`。多选题答案**必须排序**（`"CA"` 会被判错），
+  判断题认 `true/对/√` 两套说法。
+- 覆盖率（命中题数 / 总题数）低于 `cover_rate`（默认 0.8）时 `pyFlag=1` 只保存不交卷：
+  平台会把低分卷记成这份测验的成绩，硬交比不交更糟。这是刻意设计，不是缺陷。
+- `src/studydash/learning.py`：刷学习次数必须**两跳**——先 `studentstudyAjax` 拿到
+  `log/setlog` 的完整地址，再 GET 那个地址才算计次，只发第一跳等于白跑；之后
+  `detect.chaoxing.com/api/monitor` 心跳两次、中间隔 30 秒。服务端按时间窗口计次，
+  这块是串行的，并发没有意义。
+- `src/studydash/cxfont.py`：题目/选项的字体反爬。解析内嵌 TTF 的 `glyf`，按字形哈希查
+  `data/font_map_table.json`；康熙部首要先 NFKC 归一，否则同一字形因码位不同查不到。
+- 题库 token 在 `config.json` 的 `tiku.token`，`SettingsView` 回读是打码的
+  （`已配置 …abcd`），`TikuSettings.from_dict` 见到这个前缀就当作「不改」。
+- 探针习惯：`QuizRunner(acct, cfg.http, log=Log(), apply=False)` 纯只读、`plan()` 不发写请求；
+  `Config` 在 `studydash.store`（没有 `studydash.config`），`Log` 只认 `level/stream/file/quiet`。
+- 踩过的坑：快照 `data/progress.json` 里的课程**没有 `extra`**（拿不到 class_id / cpi），
+  用它构造 `Course` 再去 `chapters()` 恒为 0 ⇒ 验证测验必须走 `ChaoxingProvider.fetch()` 活抓。
+
 ## 6. 测试
 
-- 562 例，`tests/`。覆盖面：aes / aggregate / cdp / chaoxing / cli / educoder /
-  htmlx / http / icourse163 / login / mooclogin / model / providers / qr / render /
-  store / web。
+- 532 例通过 / 3 例跳过，`tests/`。覆盖面：aes / aggregate / cdp / chaoxing /
+  chaoxing_stat / cli / educoder / htmlx / http / icourse163 / login / mooclogin /
+  model / providers / qr / render / store / web / writeback。
 - `tests/fixture_course_list.html` 是真实课程列表页的缩减版。
 - 血泪教训：**写解析的测试夹具必须故意混合两种 HTML 结构**（有表头 / 无表头），
   否则「A 结构命中就再也不试 B」这类回退链 bug 测不出来。
@@ -535,6 +593,19 @@ GET 试参数（`courseId`/`classId`/`cpi`/`ut=s`），很可能也能直出 HTM
 MOOC 课程/作业（§4.2.3）都已真账号验证，只剩这一个平台。有账号就验，验不过就把状态
 改成 `broken` 而不是留着 `unverified`。
 
+### TODO-3b 真实验证 stat2 补充源
+`chaoxing_stat.py`（学习次数 / 累计观看时长 / 任务点明细）是照 `chaoxing_tool` 里那批
+`stat2-ans.chaoxing.com` 请求的形状写的，同样没用真账号跑过。验的时候注意三点：
+
+- **`jobEnc` 是所有请求的前置**。它从 `/study-data/index` 的 HTML 里正则抠出来
+  （`jobEnc = '...';`）。抠不到就只有课程列表、没有任何统计——`log.debug` 会说明跳过原因。
+- **时长页是 HTML 不是 JSON**：已完成分钟数在 `div.fl.min > span`，总时长靠
+  `总时长 (\d+)` 正则（单位分钟）。两个解析都留了兜底，两条路都空才返回 `None`。
+- **学习次数只能查当月**：`_this_month()` 取当前年月，原工具在上面写死了
+  `year=2023&month=03`。想按月看历史得加参数，不是改常量。
+
+验不过就把 `meta.status` 改成 `broken`，别留 `unverified`。
+
 ### TODO-4 发布 v3.0.0
 见 §7。
 
@@ -550,8 +621,64 @@ MOOC 课程/作业（§4.2.3）都已真账号验证，只剩这一个平台。�
 - 用户对「企业级」有明确期待：网页版、双主题、移动端、无障碍、错误提示要说人话。
 - 用户会**逐页看截图**提问题。改完界面**自己先截图看一遍**再交付。
 - 用户明确拒绝过命令行方案（「命令框对大部分人来说并不会使用」），命令行保留但不做主界面。
-- **这个项目只做只读聚合**。凡是会往「自动提交 / 刷课 / 绕过考核」方向走的需求，
-  都不做——这不是能力问题，是项目定位问题，换工具、换说法都不改变结论。
+- **这个项目只做只读聚合**，唯一的、被用户明确要求的例外是 `writeback --apply`
+  （网页版里对应课程页每张超星课程卡右上角的「上报任务点」按钮，`web/src/components/CourseCard.vue`；
+  点两下确认才发；要演练/逐分钟/限个数就走总览页页头的 `WritebackPanel.vue`；
+  点下去按钮下面就地出进度条 + 结局文案，走 SSE，断线降级轮询）。判成功以平台回包为准：
+  只有 isPassed=true 才算完成（writeback.py 的 _judge），false 记「平台没确认」——
+  早期版本把 false 解释成「没有剩余可报」还显示成功，是**假阳性**，已推翻。
+  playTime >= attDuration*1000 且没过的视频直接跳过，一个请求都不发。
+  真凭据是课程页的「已完成任务点 X/Y」（mission_counts()，端点 EP_MISSION）：
+- **两种救不回来的视频**（实测，265948593 / 266688496 上验证）：
+  - 开了人脸抓拍（节点 `videoFaceCaptureEnc` 非空）的视频，一次跳满只写 `playTime`，
+    `isPassed` 恒 `false`；变体全试过（`isdrag` 3/0/4、补 `videoFaceCaptureEnc`、
+    `randomCaptureTime=0`、逐分钟 paced）无一改变。现在**不发请求**，标 `skipped`。
+  - `playTime == attDuration*1000` 且 `isPassed=false` 是死态，再报无增量，标 `stuck`，
+    请求数 0。这类多半是早前版本跳满留下的，平台不给回退。
+  - 反例（能成功的）：264213701 的视频 `playTime` 为空、无抓拍标记 → 一次上报
+    `isPassed=true`，课程页 59 → 60 / 1442。瓶颈不是协议，是视频本身的抓拍开关。
+  上报前后各读一次，命令行打 已完成任务点：课程 60 → 61 / 1442（+1），网页结局文案也带。
+  实测：章节级 catalog_points_yi 在上报后**立刻**降（2 → 1），课程页总数由平台定时汇总，
+  要过几分钟才跟上；sum(每章 catalog_points_yi) == 总数 - 已完成 可自校验。
+  并发：课程卡上有 1/2/4/8 线程的下拉（`workers`，上限 `MAX_WRITEBACK_WORKERS = 8`，
+  `src/studydash/web/operations.py`），命令行对应 `-j/--workers`。每个工作线程各自
+  持一份 HttpClient（`writeback.py` 的 `_client()` 用 `threading.local()` 缓存，主线程
+  仍用 `self.http` 以免打掉测试里的替身），结果按 plan 顺序回填，单个任务点抛异常
+  只影响自己，`on_step` 抛异常会取消闸门并停掉剩余任务。`--paced` 会强制回到串行。
+
+  **注意：慢的不是上报，是爬取。** 实测 `aggregate()` 走 22 门课只用 28 次请求却花
+  87.2s——耗时几乎全在 `src/studydash/http.py:323 _wait()` 的 `delay` sleep 上
+  （请求中位数 0.40s，delay 就是 0.4），`plan()` 更狠，逐章翻任务点卡片页跑到 2080.9s。
+  抓取层现在也支持并发：`HttpSettings.fetch_workers`（1~8，默认 1 = 旧行为），
+  设置页有「抓取并发线程」输入框，`config.example.json` 里是 `"fetch_workers": 1`。
+  并发点四个：`aggregate.py` 的账号循环、`chaoxing.py:_fill_progress` 的课程页、
+  `_fill_works` 的作业详情、`_enrich_with_chapters` 的逐章卡片。
+  三条必须守住的性质（`tests/test_concurrency.py` 全部钉住）：
+  ① 结果按原序回填，不按完成先后（`zip(..., strict=False)` 回填 slots）；
+  ② 单个任务异常只挖掉自己那一格，`map_concurrent` 把异常交给 `on_error` 后填 `None`，
+     刻意不用 `executor.map`（它遇异常会丢弃后面已完成的结果）；
+  ③ `fetch_workers <= 1` 走同线程串行分支——`Provider._client()` 在主线程必须返回
+     `self.http`，否则单测里 `provider.http.get_text = fake` 的替身会在工作线程里失效。
+  每线程一份 HttpClient 是硬要求：`http.py` 的 `self.jar`/`self._opener`/`self._last_at`
+  都不是线程安全的，共享会让 `delay` 变成全局串行化点。提速时注意 `plan()` 仍然是
+  挨章翻页的，`fetch_workers` 只把每一层的等待叠起来，不减少请求数。
+  （2026-10 用户要求「发送视频时间以模块形式加入项目，可以只做学习通」；随后又明确
+  「继续完成我给你的任务」，要求把 `D:\chaoxing_tool` 的**全部**任务点能力搬完）。
+  现在覆盖六类：`video`/`audio`（md5 签名上报播放位置，`dtype` 依 `property.module`
+  是否为 `insertaudio` 定 Audio/Video）、`read`（`ananas/job/readv2`）、`document`
+  （`ananas/job/document`）、`book`（`ananas/job`，`property` 里有 `bookname` 就归它）、
+  `live`（`zhibo.chaoxing.com/saveTimePc`，取 `property.streamName`/`vdoid`）。
+  判定分开：阅读/文档/图书看回包 `status` 为真，直播看正文 `== "@success"`，
+  音视频看有没有回 JSON。`WRITE_URL_PREFIXES` 相应扩到五条精确前缀，别的地址照旧拒发。
+  `plan()/run()` 多了 `kinds=` 过滤（`"read,document"` 串和 `["read"]` 列表都认），
+  CLI 是 `-k/--kind`（可重复），web 侧 `op_writeback` 认 `kinds`，课程卡与
+  `WritebackPanel.vue` 各多一个「范围」下拉。类名 `ChaoxingVideoWriter` / `VideoTarget`
+  刻意没改（改名要动 8 处引用 + 全部测试），只是 `VideoTarget` 多了
+  `kind`/`jtoken`/`stream_name`/`vdoid` 四个字段。
+  仍被隔离成独立模块、默认演练、地址钉死白名单，不进 `fetch`/`all`/`web` 调用链。
+  **仍然不做的写操作：交作业、章节测验答题、签到、账号密码登录**——
+  这些在 `chaoxing_tool` 里是 `functions/deal_mission` 的另一半与 `login` 模块，
+  与「补任务点」是两件事，换说法也不改变结论。
 
 
 

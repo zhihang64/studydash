@@ -35,11 +35,12 @@ from .providers import (
     ProviderError,
     build,
     discover,
+    map_concurrent,
     metas,
 )
 from .store import Config
 
-__all__ = ["aggregate", "build_payload", "demo_courses", "summary_lines"]
+__all__ = ["aggregate", "build_payload", "demo_courses", "summary_lines", "sync_payload"]
 
 STATUS_ORDER = {"overdue": 0, "urgent": 1, "soon": 2, "later": 3, "none": 4, "done": 5}
 
@@ -69,10 +70,12 @@ def aggregate(
         log.warn("配置里没有任何启用的账号。先跑 `studydash init` 生成配置。")
         return [], []
 
-    courses: list[Course] = []
-    results: list[Account] = []
+    def run_one(account: AccountConfig) -> tuple[Account, list[Course]]:
+        """跑一个账号，返回 ``(账号结果, 课程)``。
 
-    for account in accounts:
+        任何失败都收敛成一条 ``ok=False`` 的账号结果——单个平台挂掉不能连累
+        其它平台，这是多平台看板最不该出现的问题。
+        """
         meta_name = account.display
         try:
             # providers 是一个测试接缝：注入假适配器就能在不联网的前提下
@@ -83,60 +86,26 @@ def aggregate(
             log.error(f"{meta_name}: {exc}")
             if exc.hint:
                 log.warn(f"  {exc.hint}")
-            results.append(
-                Account(
-                    platform=account.platform,
-                    label=meta_name,
-                    ok=False,
-                    message=str(exc),
-                    fetched_at=now(),
-                )
-            )
-            continue
+            return _failed(account, meta_name, str(exc)), []
 
         log.step(f"抓取 {provider.meta.name}（{meta_name}）…")
         try:
             fetched = provider.fetch()
         except AuthError as exc:
-            results.append(
-                Account(
-                    platform=account.platform,
-                    label=meta_name,
-                    ok=False,
-                    message=f"登录态失效：{exc}",
-                    fetched_at=now(),
-                )
-            )
-            continue
+            return _failed(account, meta_name, f"登录态失效：{exc}"), []
         except ProviderError as exc:
-            results.append(
-                Account(
-                    platform=account.platform,
-                    label=meta_name,
-                    ok=False,
-                    message=str(exc),
-                    fetched_at=now(),
-                )
-            )
-            continue
+            return _failed(account, meta_name, str(exc)), []
         except Exception as exc:                            # noqa: BLE001 - 适配器是第三方代码
             log.error(f"{meta_name}: 未预期的错误 {type(exc).__name__}: {exc}")
-            results.append(
-                Account(
-                    platform=account.platform,
-                    label=meta_name,
-                    ok=False,
-                    message=f"适配器异常 {type(exc).__name__}: {exc}",
-                    fetched_at=now(),
-                )
+            return (
+                _failed(account, meta_name, f"适配器异常 {type(exc).__name__}: {exc}"),
+                [],
             )
-            continue
 
         for course in fetched:
             course.platform = course.platform or account.platform
             course.extra.setdefault("platform_name", provider.meta.name)
-        courses.extend(fetched)
-        results.append(
+        return (
             Account(
                 platform=account.platform,
                 label=meta_name,
@@ -144,11 +113,41 @@ def aggregate(
                 message="" if fetched else "登录成功，但没有读到课程",
                 fetched_at=now(),
                 course_count=len(fetched),
-            )
+            ),
+            list(fetched),
         )
+
+    # 账号之间没有共享的可变状态（各一份 HttpClient、各一份 provider），所以
+    # 可以并发；但平台卡的顺序必须稳定，所以结果按 accounts 原序回填，不是
+    # 按完成的先后。单线程时走串行分支，行为和以前逐字一致。
+    workers = max(1, min(len(accounts), int(config.http.fetch_workers or 1)))
+    if workers <= 1 or len(accounts) == 1:
+        outcomes = [run_one(account) for account in accounts]
+    else:
+        outcomes = map_concurrent(run_one, accounts, workers=workers) or []
+
+    courses: list[Course] = []
+    results: list[Account] = []
+    for account, outcome in zip(accounts, outcomes, strict=False):
+        if outcome is None:                                  # run_one 不该返回 None，兜底
+            results.append(_failed(account, account.display, "抓取线程异常退出"))
+            continue
+        result, fetched = outcome
+        results.append(result)
+        courses.extend(fetched)
 
     classify_all(courses, alert_days=config.alert_days())
     return courses, results
+
+
+def _failed(account: AccountConfig, label: str, message: str) -> Account:
+    return Account(
+        platform=account.platform,
+        label=label,
+        ok=False,
+        message=message,
+        fetched_at=now(),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -500,6 +499,68 @@ def _recount_platforms(
             }
         )
     return out
+
+
+def sync_payload(
+    payload: dict[str, Any],
+    mission: Mapping[str, Mapping[str, Any]],
+    *,
+    platform: str = "",
+) -> int:
+    """把「已完成任务点 X/Y」的活读结果写回 payload，返回改动过的课程数。
+
+    ``mission`` 就是课程页上那个计数器的读数（``{"<course_id>": {"done": .., "total": ..}}``），
+    与 ``providers/chaoxing.py`` 的 ``_fill_progress`` 同一个口径，所以这里算出的
+    ``ratio`` 与「整抓一次」完全一致——这也正是为什么「上报完顺手改 payload」比
+    「上报完自动再抓一遍」划算：一次额外请求都不用发，看板立刻就是新数字。
+
+    只动 ``courses`` 里对应课程的 ``progress`` / ``progress_parts`` / ``pending_points``，
+    总览与平台卡用 :func:`_recount_overview` / :func:`_recount_platforms` 重算；
+    别的平台、别的课、时间线一概不碰（用 ``build_payload`` 重建会丢掉其它平台的数据，
+    因为写回任务只抓了 chaoxing 一个平台）。
+    """
+    wanted = {str(k): v for k, v in mission.items() if str(k)}
+    if not wanted:
+        return 0
+    courses = [c for c in payload.get("courses") or [] if isinstance(c, dict)]
+    touched = 0
+    for card in courses:
+        if platform and str(card.get("platform") or "") != platform:
+            continue
+        got = wanted.get(str(card.get("id") or ""))
+        if not isinstance(got, Mapping):
+            continue
+        try:
+            total = int(got.get("total") or 0)
+            done = int(got.get("done") or 0)
+        except (TypeError, ValueError):
+            continue
+        if total <= 0:
+            continue
+        done = min(max(done, 0), total)
+        ratio = round(done / total, 4)
+        parts = card.get("progress_parts")
+        if isinstance(parts, list) and parts:
+            for bar in parts:
+                if isinstance(bar, dict) and str(bar.get("label") or "") == "任务点":
+                    bar.update({"done": done, "total": total, "ratio": ratio})
+                    break
+        else:
+            card["progress_parts"] = [
+                {"label": "任务点", "done": done, "total": total, "ratio": ratio}
+            ]
+        card["progress"] = ratio
+        card["has_data"] = True
+        if isinstance(card.get("pending_points"), int):
+            card["pending_points"] = max(0, total - done)
+        touched += 1
+    if not touched:
+        return 0
+    payload["courses"] = courses
+    timeline = [a for a in payload.get("timeline") or [] if isinstance(a, Mapping)]
+    payload["overview"] = _recount_overview(payload.get("overview") or {}, courses, timeline)
+    payload["platforms"] = _recount_platforms(payload.get("platforms") or [], courses)
+    return touched
 
 
 def _strip_assignments(card: Mapping[str, Any]) -> dict[str, Any]:

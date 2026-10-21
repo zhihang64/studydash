@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from studydash.providers.chaoxing import (
     ChaoxingProvider,
     _align_deadline_year,
     _remaining_hours,
+    extract_marg,
 )
 
 FIXTURE = Path(__file__).parent / "fixture_course_list.html"
@@ -767,3 +769,51 @@ def test_fetch_fills_works_by_default(provider, monkeypatch):
     provider.fetch()
 
     assert len(calls) == 1
+
+# --------------------------------------------------------------------------
+# mArg 提取
+# --------------------------------------------------------------------------
+#: 真实知识卡页的开头大体长这样：先一句 ``mArg = "";``，再是真正的对象，
+#: 对象后面紧跟 ``};`` 和 ``catch``。旧的非贪婪正则会把 ``};`` 一起吞掉。
+KJ_PAGE = """
+<html><body><script type="text/javascript">
+mArg = "";
+try {
+  mArg = {"attachments":[{"property":{"module":"video","name":"1.1 视频"},
+    "jobid":"888","objectid":"999","defaults":{"reportUrl":"https://mooc1.chaoxing.com/mooc-ans/multimedia/log/a/1?x=2"}}],
+    "note":"带 } 和 { 的字符串不算层级"};
+}catch(e){}
+</script></body></html>
+"""
+
+
+def test_extract_marg_skips_the_empty_assignment():
+    """页面上先有 ``mArg = "";``，别把空串当成对象起点。"""
+    raw = extract_marg(KJ_PAGE)
+    assert raw.startswith("{")
+
+
+def test_extract_marg_does_not_swallow_the_trailing_brace():
+    """回归：旧正则把对象闭合后的 ``};`` 一起带走，json.loads 报 Extra data。"""
+    raw = extract_marg(KJ_PAGE)
+    assert raw.endswith("}")
+    assert not raw.endswith("}}")
+    json.loads(raw)          # 能直接解析才算过
+
+
+def test_extract_marg_ignores_braces_inside_strings():
+    """课名里带 ``{`` ``}`` 不能让层级算错，否则对象会被截断。"""
+    data = json.loads(extract_marg(KJ_PAGE))
+    assert data["note"] == "带 } 和 { 的字符串不算层级"
+    assert data["attachments"][0]["jobid"] == "888"
+
+
+def test_extract_marg_returns_empty_without_an_object():
+    assert extract_marg("<html>没有 mArg</html>") == ""
+    assert extract_marg("") == ""
+
+
+def test_extract_marg_handles_escaped_quotes():
+    """字符串里的 ``\\"`` 不能提前结束引号状态。"""
+    html = 'mArg = {"a":"x\\"}{ y","b":1};'
+    assert json.loads(extract_marg(html)) == {"a": 'x"}{ y', "b": 1}

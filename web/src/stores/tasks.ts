@@ -174,6 +174,9 @@ export const useTasksStore = defineStore('tasks', () => {
     } else if (task.kind === 'fetch') {
       await useDashboardStore().load()
       await useAccountsStore().load()
+    } else if (task.kind === 'writeback') {
+      const result = task.result ?? {}
+      if (result.applied) await useDashboardStore().load()
     }
   }
 
@@ -200,6 +203,20 @@ export const useTasksStore = defineStore('tasks', () => {
       const traces = result.traces as unknown[] | undefined
       return traces ? `留档了 ${traces.length} 条请求` : ''
     }
+    if (task.kind === 'writeback') {
+      const counts = result.counts as
+        | { done?: number; failed?: number; total?: number; requests?: number }
+        | undefined
+      if (counts) {
+        const verb = result.applied ? '已上报' : '演练通过'
+        const parts = [`${verb} ${counts.done ?? 0} 个`]
+        if (counts.total) parts.push(`共 ${counts.total} 个任务点`)
+        if (counts.failed) parts.push(`失败 ${counts.failed} 个`)
+        // 后端把新的任务点计数直接写回了看板数据，这里顺手告诉用户「不用再抓取」。
+        if (result.sync) parts.push('看板已同步')
+        return parts.join(' · ')
+      }
+    }
     return ''
   }
 
@@ -211,6 +228,9 @@ export const useTasksStore = defineStore('tasks', () => {
     login_live: '浏览器登录',
     fetch: '抓取学业数据',
     probe: '接口探测',
+    writeback: '任务点上报',
+    quiz: '章节测验答题',
+    learning: '刷章节学习次数',
   }
 
   function label(kind: string): string {

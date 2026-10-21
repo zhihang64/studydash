@@ -61,6 +61,7 @@ def settings_view(state: AppState, config: Any) -> dict[str, Any]:
         "config_path": str(state.workspace.config_path),
         "home": str(state.workspace.root),
         "http": config.http.to_dict(),
+        "tiku": config.tiku.masked(),
         "ui": {"theme": config.theme(), "alert_days": config.alert_days()},
         "keep_raw": bool(config.keep_raw),
     }

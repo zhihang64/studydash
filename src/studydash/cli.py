@@ -16,8 +16,11 @@
     config      查看/校验配置（输出已脱敏）
     doctor      环境自检
     version     版本号
+    writeback   把任务点写回学习通（实验性，不加 --apply 只演练）
 
-约定：任何命令都不写平台侧数据，只读。
+约定：除 ``writeback --apply`` 外，任何命令都不写平台侧数据，只读。
+``writeback`` 是唯一的例外，所以它单独走 :mod:`studydash.writeback`，
+不出现在 ``fetch`` / ``all`` / ``web`` 的任何调用链里。
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__, diagnostics, educoder_login, login, mooclogin, passlogin, qrlogin
-from .aggregate import aggregate, build_payload, demo_courses, summary_lines
+from .aggregate import aggregate, build_payload, demo_courses, summary_lines, sync_payload
 from .log import Log
 from .model import SCHEMA_VERSION, Account, classify_all, iso, now
 from .providers import AccountConfig, HttpSettings, ProviderError, build, discover, ids, metas
@@ -194,6 +197,78 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = subs.add_parser("version", parents=[common], help="打印版本")
     p.set_defaults(func=cmd_version)
+
+    p = subs.add_parser(
+        "writeback",
+        parents=[common],
+        help="把任务点写回学习通（实验性；不加 --apply 只演练不发送）",
+    )
+    p.add_argument("--platform", default="chaoxing", help="平台 id，目前只支持 chaoxing")
+    p.add_argument("--apply", action="store_true", help="真的发出上报；不加则只演练")
+    p.add_argument("--paced", action="store_true", help="逐分钟上报（慢，但更像真的在看）")
+    p.add_argument(
+        "--ramp",
+        action="store_true",
+        help="递进上报：把播放位置按 30%%/70%%/100%% 分三步发（每步间隔 --ramp-delay 秒）。"
+        "实测通过率远高于一次跳满，推荐用这个代替 --paced",
+    )
+    p.add_argument("--ramp-delay", type=float, default=1.5, help="递进上报每步之间的间隔秒数")
+    p.add_argument("--limit", type=int, default=0, help="最多处理几个任务点，0 表示不限制")
+    p.add_argument("--course", default="", help="只处理课名包含这段文字的课程")
+    p.add_argument(
+        "-k",
+        "--kind",
+        dest="kinds",
+        action="append",
+        choices=["video", "audio", "read", "document", "book", "live"],
+        help="只处理这类任务点，可重复；不传就是全部（音视频/阅读/文档/图书/直播）",
+    )
+    p.add_argument("--interval", type=float, default=59.8, help="逐分钟上报的间隔秒数")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="连开了人脸抓拍的视频也照发（默认跳过：实测报不出通过，还会把进度推到死态）",
+    )
+    p.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        default=1,
+        help="并发上报的线程数，默认 1（串行）。4~8 一般就够，--paced 时强制串行",
+    )
+    p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    p.set_defaults(func=cmd_writeback)
+
+    p = subs.add_parser(
+        "quiz",
+        parents=[common],
+        help="做章节测验（靠题库；不加 --apply 只清点不交卷）",
+    )
+    p.add_argument("--platform", default="chaoxing", help="平台 id，目前只支持 chaoxing")
+    p.add_argument("--apply", action="store_true", help="真的作答并交卷；不加则只清点")
+    p.add_argument("--limit", type=int, default=0, help="最多处理几份测验，0 表示不限制")
+    p.add_argument("--course", default="", help="只处理课名包含这段文字的课程")
+    p.add_argument(
+        "--cover-rate",
+        type=float,
+        default=-1.0,
+        help="题库覆盖率低于这个比例就不交卷，默认取配置文件里的 tiku.cover_rate（0.8）",
+    )
+    p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    p.set_defaults(func=cmd_quiz)
+
+    p = subs.add_parser(
+        "learning",
+        parents=[common],
+        help="刷章节学习次数（每轮要等 30 秒心跳；不加 --apply 只估算）",
+    )
+    p.add_argument("--platform", default="chaoxing", help="平台 id，目前只支持 chaoxing")
+    p.add_argument("--apply", action="store_true", help="真的去访问章节；不加则只估算耗时")
+    p.add_argument("--times", type=int, default=1, help="每个章节刷几轮，默认 1")
+    p.add_argument("--limit", type=int, default=0, help="最多处理几个章节，0 表示不限制")
+    p.add_argument("--course", default="", help="只处理课名包含这段文字的课程")
+    p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    p.set_defaults(func=cmd_learning)
 
     return parser
 
@@ -946,6 +1021,346 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"{PROG} {__version__}")
     print(f"payload schema v{SCHEMA_VERSION}")
+    return 0
+
+
+def cmd_writeback(args: argparse.Namespace) -> int:
+    """把任务点写回学习通。
+
+    这是整个项目里**唯一**会写平台侧数据的命令，所以刻意做得很啰嗦：
+    不加 ``--apply`` 一律只演练，不加 ``--paced`` 就是一次请求送到片尾。
+    它不挂在 ``fetch`` / ``all`` / ``web`` 下面，只能手动敲。
+
+    覆盖音视频（签名上报观看位置）与阅读/文档/图书/直播（一次性 GET 任务点接口），
+    用 ``--kind`` 可以只跑其中一类。
+    """
+    from .writeback import ChaoxingVideoWriter, WritebackError  # 只在真正用到时导入
+
+    ctx = Ctx(args)
+    platform = _opt(args, "platform", "chaoxing")
+    as_json = _flag(args, "json")
+
+    if platform != "chaoxing":
+        ctx.log.error(f"目前只支持 chaoxing，收到 {platform!r}")
+        ctx.log.info(f"可用的是：{', '.join(ids())}")
+        return 1
+
+    account = None
+    for item in ctx.config.accounts:
+        if item.platform == platform:
+            account = item
+            break
+    if account is None:
+        ctx.log.error(f"配置里没有 {platform} 账号")
+        ctx.log.info(f"先跑 `{PROG} init`，再把 Cookie 填进 config.json")
+        return 1
+    if not account.cookie.strip():
+        ctx.log.error(f"{platform} 账号的 Cookie 是空的")
+        ctx.log.info(f"先跑 `{PROG} login {platform}` 扫码登录")
+        return 1
+    if not account.enabled:
+        ctx.log.warn(f"{platform} 账号在配置里是 enabled=false，这次仍然按你的命令行执行")
+
+    limit = int(getattr(args, "limit", 0) or 0)
+    paced = _flag(args, "paced")
+    ramp = _flag(args, "ramp")
+    ramp_delay = float(getattr(args, "ramp_delay", 1.5) or 0.0)
+    apply = _flag(args, "apply")
+    interval = float(getattr(args, "interval", 59.8) or 59.8)
+    needle = _opt(args, "course", "").strip()
+    workers = max(1, int(getattr(args, "workers", 1) or 1))
+    kinds = getattr(args, "kinds", None) or None
+
+    if not apply:
+        ctx.log.warn("演练模式：不会向平台发出任何上报。确认无误后加 --apply 才会真的写。")
+    if paced and not apply:
+        ctx.log.info("演练模式下 --paced 只影响预估次数，不会 sleep。")
+
+    ctx.log.step(f"读取 {platform} 课程与章节")
+    courses, _ = aggregate(ctx.config, log=ctx.log, only=[platform])
+    if needle:
+        kept = [c for c in courses if needle.lower() in (c.name or "").lower()]
+        if not kept:
+            ctx.log.error(f"没有课名包含 {needle!r} 的课程")
+            names = "、".join(c.name for c in courses) or "（空）"
+            ctx.log.info(f"现有课程：{names}")
+            return 1
+        courses = kept
+    if not courses:
+        ctx.log.warn("没有可处理的课程（Cookie 过期或还没选课？）")
+        return 0
+
+    writer = ChaoxingVideoWriter(
+        account,
+        ctx.settings(),
+        log=ctx.log,
+        apply=apply,
+        interval=interval,
+        force=bool(getattr(args, "force", False)),
+        ramp_delay=ramp_delay,
+    )
+    if not writer.user_id:
+        ctx.log.warn("Cookie 里没有 _uid，签名拼不出来，上报会全部被拒")
+
+    witness = courses[:5]
+    mission_before = {str(c.id): writer.mission_counts(c) for c in witness}
+    mission_before = {k: v for k, v in mission_before.items() if v}
+    for cid, (done_n, total_n) in mission_before.items():
+        name = next((c.name for c in witness if str(c.id) == cid), cid)
+        ctx.log.info(f"上报前的已完成任务点：{name} {done_n}/{total_n}")
+
+    try:
+        results = writer.run(
+            courses, limit=limit, paced=paced, workers=workers, kinds=kinds, ramp=ramp
+        )
+    except WritebackError as exc:
+        ctx.log.error(str(exc))
+        if exc.hint:
+            ctx.log.info(exc.hint)
+        return 1
+
+    if writer.unsupported:
+        parts: list[str] = []
+        for bucket in writer.unsupported.values():
+            parts.extend(f"{label} {count} 个" for label, count in bucket.items())
+        ctx.log.warn(
+            "另有 " + "、".join(parts) + " 任务点本工具不做（章节测验要题库、讨论/考试要人工），"
+            "平台那个「已完成任务点 X/Y」把它们也算进分母"
+        )
+
+    done = [r for r in results if r.get("ok") is True]
+    failed = [r for r in results if r.get("ok") is False]
+    skipped = [r for r in results if r.get("ok") is None]
+    stuck = [r for r in results if r.get("status") == "stuck"]
+    requests = sum(int(r.get("requests") or 0) for r in results)
+
+    if as_json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 1 if failed else 0
+
+    ctx.log.info("")
+    if not results:
+        ctx.log.warn("没找到任何待上报的任务点")
+        ctx.log.info("可能是：章节页没有任务点节点、任务点已全部完成、或 Cookie 已过期。")
+        return 0
+
+    if mission_before:
+        fresh: dict[str, dict[str, int]] = {}
+        for cid, (done_n, total_n) in mission_before.items():
+            now = writer.mission_counts(next(c for c in witness if str(c.id) == cid))
+            if not now:
+                continue
+            fresh[cid] = {"done": now[0], "total": now[1]}
+            name = next((c.name for c in witness if str(c.id) == cid), cid)
+            gain = now[0] - done_n
+            # 平台计数是异步落库的：刚报完往往还读到旧值，别让人以为白刷了。
+            tail = "" if gain > 0 else "（平台计数滞后几十秒，隔会儿再查）"
+            ctx.log.info(
+                f"已完成任务点：{name} {done_n} → {now[0]} / {now[1]}（{gain:+d}）{tail}"
+            )
+        # 看板是 data/progress.json 里的快照，只有 fetch 会重写它。既然刚把计数器
+        # 活读了一遍，就顺手把动过的课改对——省掉一次整抓（几十秒、几十个请求）。
+        if apply and done and fresh:
+            payload = ctx.workspace.load_progress()
+            touched = sync_payload(payload, fresh) if payload else 0
+            if touched:
+                ctx.workspace.save_progress(payload)
+                ctx.log.ok(f"看板已同步：{touched} 门课的任务点进度按平台读数更新")
+    verb = "平台确认完成" if apply else "演练通过"
+    ctx.log.ok(f"{verb} {len(done)} 个 / 共 {len(results)} 个任务点，发出 {requests} 次请求")
+    if skipped:
+        ctx.log.info(
+            f"跳过 {len(skipped)} 个（演练，或该视频开了人脸抓拍，只能手动播放）"
+            if apply
+            else f"演练跳过 {len(skipped)} 个（没真的发请求）"
+        )
+    if stuck:
+        ctx.log.warn(
+            f"{len(stuck)} 个任务点播放位置早就满了却没判通过（平台死态），"
+            "再发请求也不会变："
+        )
+        for item in stuck[:5]:
+            ctx.log.info("  · " + str(item.get("label", "?")))
+    others = [r for r in failed if r.get("status") != "stuck"]
+    if others:
+        ctx.log.warn(f"{len(others)} 个失败：")
+        for item in others[:10]:
+            ctx.log.info(f"  · {item.get('label', '?')}：{item.get('reason', '')}")
+        if len(others) > 10:
+            ctx.log.info(f"  …… 另外 {len(others) - 10} 个")
+        return 1
+    if not apply:
+        ctx.log.info("确认课程和时长都对，再加 --apply 重跑一次就会真的写进去。")
+    return 0
+
+
+def cmd_quiz(args: argparse.Namespace) -> int:
+    """做章节测验：题库查答案，覆盖率够才交卷。
+
+    不加 ``--apply`` 只清点（哪门课几份测验、题库能覆盖几道题），一个请求都不
+    往交卷接口发。题库 token 在 ``config.json`` 的 ``tiku.token``，也可以用
+    网页版「设置」页填。
+    """
+    from .quiz import QuizRunner  # 只在真正用到时导入
+
+    ctx = Ctx(args)
+    platform = _opt(args, "platform", "chaoxing")
+    as_json = _flag(args, "json")
+    if platform != "chaoxing":
+        ctx.log.error(f"目前只支持 chaoxing，收到 {platform!r}")
+        return 1
+    account = next((a for a in ctx.config.accounts if a.platform == platform), None)
+    if account is None:
+        ctx.log.error(f"配置里没有 {platform} 账号")
+        ctx.log.info(f"先跑 `{PROG} init`，再把 Cookie 填进 config.json")
+        return 1
+    if not account.cookie.strip():
+        ctx.log.error(f"{platform} 账号的 Cookie 是空的")
+        ctx.log.info(f"先跑 `{PROG} login {platform}` 扫码登录")
+        return 1
+
+    apply = _flag(args, "apply")
+    limit = int(getattr(args, "limit", 0) or 0)
+    needle = _opt(args, "course", "").strip()
+    cover = float(getattr(args, "cover_rate", -1.0) or -1.0)
+    if cover < 0:
+        cover = ctx.config.tiku.cover_rate
+
+    if not apply:
+        ctx.log.warn("演练模式：不会交卷。确认无误后加 --apply 才会真的作答并提交。")
+    tiku = ctx.config.tiku.client(log=ctx.log.debug)
+    if tiku is None:
+        ctx.log.warn("没配题库 token：只能列出测验，一道也答不了（设置 tiku.token）")
+
+    ctx.log.step(f"读取 {platform} 课程与章节")
+    courses, _ = aggregate(ctx.config, log=ctx.log, only=[platform])
+    if needle:
+        kept = [c for c in courses if needle.lower() in (c.name or "").lower()]
+        if not kept:
+            ctx.log.error(f"没有课名包含 {needle!r} 的课程")
+            return 1
+        courses = kept
+    if not courses:
+        ctx.log.warn("没有可处理的课程（Cookie 过期或还没选课？）")
+        return 0
+
+    runner = QuizRunner(
+        account,
+        ctx.settings(),
+        log=ctx.log,
+        apply=apply,
+        tiku=tiku,
+        cover_rate=cover,
+    )
+    ctx.log.step("清点章节测验")
+    todo = runner.plan(courses, limit=limit)
+    ctx.log.info(f"共 {len(todo)} 份章节测验")
+    if not todo:
+        ctx.log.warn("没找到章节测验（章节页没有 workid 任务点？）")
+        return 0
+
+    results = [runner.solve(target) for _course, target in todo]
+    if as_json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 1 if any(r.get("ok") is False for r in results) else 0
+
+    questions = sum(int(r.get("total") or 0) for r in results)
+    answered = sum(int(r.get("answered") or 0) for r in results)
+    done = [r for r in results if r.get("ok") is True]
+    failed = [r for r in results if r.get("ok") is False]
+    requests = sum(int(r.get("requests") or 0) for r in results)
+
+    ctx.log.info("")
+    for item in results:
+        mark = "✓" if item.get("ok") is True else ("!" if item.get("ok") is False else "·")
+        ctx.log.info(
+            f"  {mark} {item.get('label', '?')}：{item.get('total', 0)} 道题 / "
+            f"覆盖 {item.get('answered', 0)} 道 —— {item.get('reason', '')}"
+        )
+    verb = "平台已收卷" if apply else "演练通过"
+    ctx.log.ok(
+        f"{verb} {len(done)} 份 / 共 {len(results)} 份，{questions} 道题（覆盖 {answered} 道），"
+        f"发出 {requests} 次请求"
+    )
+    if failed:
+        ctx.log.warn(f"{len(failed)} 份没通过，原因见上面每行的说明")
+        return 1
+    if not apply:
+        ctx.log.info("确认题目和覆盖数都对，再加 --apply 重跑一次就会真的交卷。")
+    return 0
+
+
+def cmd_learning(args: argparse.Namespace) -> int:
+    """刷章节学习次数。
+
+    学习通按时间窗口计数：访问章节 → 计次 → 心跳 → 等 30 秒 → 心跳。所以每刷
+    一次至少要 30 秒，命令会很慢；不加 ``--apply`` 只估时间，不碰平台。
+    """
+    from .learning import HEARTBEAT_WAIT, LearningCounter  # 只在真正用到时导入
+
+    ctx = Ctx(args)
+    platform = _opt(args, "platform", "chaoxing")
+    as_json = _flag(args, "json")
+    if platform != "chaoxing":
+        ctx.log.error(f"目前只支持 chaoxing，收到 {platform!r}")
+        return 1
+    account = next((a for a in ctx.config.accounts if a.platform == platform), None)
+    if account is None:
+        ctx.log.error(f"配置里没有 {platform} 账号")
+        return 1
+    if not account.cookie.strip():
+        ctx.log.error(f"{platform} 账号的 Cookie 是空的")
+        ctx.log.info(f"先跑 `{PROG} login {platform}` 扫码登录")
+        return 1
+
+    apply = _flag(args, "apply")
+    limit = int(getattr(args, "limit", 0) or 0)
+    times = max(1, int(getattr(args, "times", 1) or 1))
+    needle = _opt(args, "course", "").strip()
+    if not apply:
+        ctx.log.warn("演练模式：不会访问章节。确认无误后加 --apply 才真的去刷。")
+
+    ctx.log.step(f"读取 {platform} 课程与章节")
+    courses, _ = aggregate(ctx.config, log=ctx.log, only=[platform])
+    if needle:
+        kept = [c for c in courses if needle.lower() in (c.name or "").lower()]
+        if not kept:
+            ctx.log.error(f"没有课名包含 {needle!r} 的课程")
+            return 1
+        courses = kept
+    if not courses:
+        ctx.log.warn("没有可处理的课程（Cookie 过期或还没选课？）")
+        return 0
+
+    counter = LearningCounter(account, ctx.settings(), log=ctx.log, apply=apply)
+    todo = counter.plan(courses, limit=limit)
+    if not todo:
+        ctx.log.warn("没找到任何章节")
+        return 0
+    estimate = len(todo) * times * HEARTBEAT_WAIT
+    ctx.log.info(
+        f"共 {len(todo)} 个章节，刷 {times} 轮，每轮等 {HEARTBEAT_WAIT:.0f} 秒 ⇒ "
+        f"预计 {estimate / 60:.0f} 分钟"
+    )
+
+    results = counter.run(courses, times=times, limit=limit, work=todo)
+    if as_json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 1 if any(r.get("ok") is False for r in results) else 0
+
+    done = [r for r in results if r.get("ok") is True]
+    failed = [r for r in results if r.get("ok") is False]
+    requests = sum(int(r.get("requests") or 0) for r in results)
+    ctx.log.info("")
+    verb = "已刷" if apply else "演练通过"
+    ctx.log.ok(f"{verb} {len(done)} 次 / 共 {len(results)} 次，发出 {requests} 次请求")
+    if failed:
+        ctx.log.warn(f"{len(failed)} 次没成功：")
+        for item in failed[:10]:
+            ctx.log.info(f"  · {item.get('label', '?')}：{item.get('reason', '')}")
+        return 1
+    if not apply:
+        ctx.log.info("确认章节范围对，再加 --apply 重跑一次就会真的去刷。")
     return 0
 
 

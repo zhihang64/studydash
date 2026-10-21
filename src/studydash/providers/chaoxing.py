@@ -124,7 +124,46 @@ RE_LINK_TEXT = re.compile(r"<a\b[^>]*>(.*?)</a>", re.S | re.I)
 RE_TEACHER_PREFIX = re.compile(
     r"(?:授课教师|教师|讲师|老师)\s*[：:]\s*([^<\n]{1,40})", re.I
 )
-RE_MARG = re.compile(r"mArg\s*=\s*(\{[\s\S]*?\})\s*catch", re.I)
+#: ``mArg`` 的起点。注意页面上先有一句 ``mArg = "";``（空串），
+#: 所以这里用前瞻断言 ``{`` 把它跳过去，只认真正的对象。
+RE_MARG_START = re.compile(r"mArg\s*=\s*(?=\{)", re.I)
+
+
+def extract_marg(html: str) -> str:
+    """从知识卡页里取出 ``mArg`` 那个 JSON 对象。
+
+    页面里的原样是 ``mArg = {...};\\n}catch(e){``——对象结束后还跟着 ``};``。
+    早期版本用非贪婪正则 ``mArg\\s*=\\s*(\\{[\\s\\S]*?\\})\\s*catch`` 去匹配，会在
+    对象闭合后继续吞掉 ``};`` 之类的尾巴，``json.loads`` 于是报
+    ``Extra data: line 1 column ...``，任务点就全部解析不出来。
+    这里改成按花括号层级扫描，并跳过字符串字面量里的括号。取不到返回空串。
+    """
+    match = RE_MARG_START.search(html)
+    if not match:
+        return ""
+    start = match.end()
+    depth = 0
+    quote = ""
+    escaped = False
+    for index in range(start, len(html)):
+        char = html[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start : index + 1]
+    return ""
 
 #: 课程页头部：``已完成任务点: <span style="color:#00B368">0</span>/77``。
 #: 数字常被包在 span/em 里，所以数字两侧都要允许穿标签。
@@ -651,12 +690,15 @@ class ChaoxingProvider(Provider):
         """逐门课读课程页，取「已完成任务点 X/Y」当进度。
 
         这是唯一可靠的进度来源：课程列表页只给课程名与班级，没有百分比。
-        每门课一次 GET，22 门课约 10 秒，所以设了上限 ``options.max_progress``。
+        每门课一次 GET，22 门课约 10 秒，所以设了上限 ``options.max_progress``；
+        ``http.fetch_workers > 1`` 时这些 GET 并发发出（结果仍按课程原序回填，
+        平台卡顺序不会乱）。
         """
         cap = int(self.account.options.get("max_progress", 60))
+        selected = list(courses)[:cap]
+        infos = self.map_concurrent(self._course_page_info, selected)
         filled = 0
-        for course in courses[:cap]:
-            info = self._course_page_info(course)
+        for course, info in zip(selected, infos, strict=False):
             if info is None:
                 continue
             total, done = info["total"], info["done"]
@@ -683,7 +725,7 @@ class ChaoxingProvider(Provider):
             ][:300]
             if chapters:
                 course.extra["chapters"] = chapters
-        self.log.debug(f"  进度：{filled}/{min(len(courses), cap)} 门课读到任务点数据")
+        self.log.debug(f"  进度：{filled}/{len(selected)} 门课读到任务点数据")
 
     def _course_page_url(self, course: Course) -> str:
         return EP_COURSE_PAGE.format(
@@ -697,7 +739,7 @@ class ChaoxingProvider(Provider):
         """读一门课的课程页并解析；失败返回 None（登录失效则抛出）。"""
         url = self._course_page_url(course)
         try:
-            html = self.http.get_text(url, note=f"{course.name} 课程页")
+            html = self._client().get_text(url, note=f"{course.name} 课程页")
         except (HttpError, ProviderError) as exc:
             self.log.debug(f"  {course.name}: 课程页读取失败 {exc}")
             return None
@@ -893,9 +935,11 @@ class ChaoxingProvider(Provider):
 
         by_id = {course.id: course for course in courses}
         cap = int(self.account.options.get("max_work_details", 60))
-        details = 0
-        attached = 0
 
+        # 先决定「哪些项要读详情」，再并发去读，最后按原顺序串行挂到课程上。
+        # 拆成三步是因为 ``course.assignments.append`` 是唯一跨项共享的写点：
+        # 并发里直接 append 会串位，而作业本该按列表页顺序排在卡片上。
+        pending: list[tuple[dict[str, Any], Course, str, bool]] = []
         for item in items:
             course = by_id.get(item["course_id"])
             if course is None:
@@ -906,17 +950,28 @@ class ChaoxingProvider(Provider):
                     f"（{item['course_display'] or '显示名未知'}）不在课程列表里，跳过"
                 )
                 continue
+            status, finished = _WORK_STATUS_MAP.get(item["status"], ("unknown", False))
+            pending.append((item, course, status, finished))
 
-            status, finished = _WORK_STATUS_MAP.get(
-                item["status"], ("unknown", False)
+        needing = [row for row in pending if not row[3]][: max(0, cap)]
+        detail_by_id: dict[str, dict[str, Any]] = {}
+        if needing:
+            fetched = self.map_concurrent(
+                lambda row: self._work_detail(row[0]["url"]), needing
             )
+            for row, detail in zip(needing, fetched, strict=False):
+                if detail is not None:
+                    detail_by_id[row[0]["id"]] = detail
+        details = len(detail_by_id)
+        attached = 0
+
+        for item, course, status, finished in pending:
             due: datetime | None = None
             score: float | None = None
 
             if not finished:
-                if details < cap:
-                    detail = self._work_detail(item["url"])
-                    details += 1
+                if item["id"] in detail_by_id:
+                    detail = detail_by_id[item["id"]]
                     due = detail["due"]
                     score = detail["score"]
                 if due is not None:
@@ -1015,7 +1070,7 @@ class ChaoxingProvider(Provider):
         if not url:
             return {"due": None, "score": None}
         # ``get_text`` 已经把 HttpError 吞成空串并写进日志，这里只判断有没有内容。
-        html = self.http.get_text(url, note="作业详情")
+        html = self._client().get_text(url, note="作业详情")
         if not html:
             return {"due": None, "score": None}
         return self._parse_work_detail(html)
@@ -1059,26 +1114,50 @@ class ChaoxingProvider(Provider):
     # ------------------------------------------------------------------ #
 
     def _enrich_with_chapters(self, courses: list[Course]) -> None:
+        """给每门课挂上章节任务点（实验性）。
+
+        两层并发：课程之间、同一课程的章节之间都各自独立（每章一次 GET，
+        互不依赖）。所有请求先并发跑完、拿到 ``Assignment`` 列表，再回到
+        当前线程按课程/章节原序 append——``course.assignments`` 是唯一的
+        跨线程共享写点，边跑边 append 会串位。
+        """
         cap = int(self.account.options.get("max_chapters", 40))
         failed = 0
+        chapters_of: dict[str, list[tuple[str, str]]] = {}
         for course in courses:
             try:
-                chapters = self._chapters_of(course)
+                chapters_of[course.id] = self._chapters_of(course)[:cap]
             except (HttpError, ProviderError) as exc:
                 failed += 1
                 self.log.debug(f"  {course.name}: 章节读取失败 {exc}")
-                continue
-            for knowledge_id, chapter_name in chapters[:cap]:
-                try:
-                    self._attach_cards(course, knowledge_id, chapter_name)
-                except (HttpError, ValueError) as exc:
-                    self.log.debug(f"  {course.name}/{chapter_name}: 任务点解析失败 {exc}")
-
         if failed and failed == len(courses):
             self.log.warn(
                 "章节任务点全部读取失败——该功能可能已被平台改版。"
                 "跑 `studydash probe chaoxing` 取原始响应后再修 providers/chaoxing.py。"
             )
+            return
+
+        tasks: list[tuple[Course, str, str]] = [
+            (course, knowledge_id, chapter_name)
+            for course in courses
+            for knowledge_id, chapter_name in chapters_of.get(course.id, [])
+        ]
+        if not tasks:
+            return
+
+        def fetch_one(task: tuple[Course, str, str]) -> list[Assignment] | None:
+            course, knowledge_id, chapter_name = task
+            try:
+                return self._fetch_cards(course, knowledge_id, chapter_name)
+            except (HttpError, ValueError) as exc:
+                self.log.debug(f"  {course.name}/{chapter_name}: 任务点解析失败 {exc}")
+                return None
+
+        for (course, _kid, _cname), cards in zip(
+            tasks, self.map_concurrent(fetch_one, tasks), strict=False
+        ):
+            if cards:
+                course.assignments.extend(cards)
 
     def _chapters_of(self, course: Course) -> list[tuple[str, str]]:
         """章节列表走课程页解析。
@@ -1100,6 +1179,11 @@ class ChaoxingProvider(Provider):
         return out
 
     def _attach_cards(self, course: Course, knowledge_id: str, chapter_name: str) -> None:
+        course.assignments.extend(self._fetch_cards(course, knowledge_id, chapter_name))
+
+    def _fetch_cards(
+        self, course: Course, knowledge_id: str, chapter_name: str
+    ) -> list[Assignment]:
         url = EP_KNOWLEDGE_CARDS.format(
             clazzid=course.extra.get("class_id", ""),
             courseid=course.id,
@@ -1107,18 +1191,19 @@ class ChaoxingProvider(Provider):
             cpi=course.extra.get("cpi", ""),
             ts="",
         ).replace("&v=", "&v=&")
-        html = self.http.get_text(url, note=f"{course.name}/{chapter_name} 任务点")
+        html = self._client().get_text(url, note=f"{course.name}/{chapter_name} 任务点")
         if not html:
-            return
+            return []
 
-        match = RE_MARG.search(html)
-        if not match:
+        raw_json = extract_marg(html)
+        if not raw_json:
             raise ValueError("响应里没有 mArg JSON")
         try:
-            data = json.loads(match.group(1))
+            data = json.loads(raw_json)
         except ValueError as exc:
             raise ValueError(f"mArg 不是合法 JSON: {exc}") from exc
 
+        cards: list[Assignment] = []
         for node in _walk_cards(data):
             kind = _kind_of(node.get("property", {}).get("module"), node.get("type"))
             job_id = str(node.get("jobid") or node.get("jobId") or "").strip()
@@ -1134,7 +1219,7 @@ class ChaoxingProvider(Provider):
                 or node.get("endTime")
                 or node.get("dueDate")
             )
-            course.assignments.append(
+            cards.append(
                 Assignment(
                     id=job_id,
                     title=f"{chapter_name} · {name}" if name != chapter_name else chapter_name,
@@ -1148,6 +1233,7 @@ class ChaoxingProvider(Provider):
                     platform_name=self.meta.name,
                 )
             )
+        return cards
 
 
 # --------------------------------------------------------------------------- #

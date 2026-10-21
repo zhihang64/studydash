@@ -105,8 +105,15 @@ class FakeProvider(Provider):
 
     meta = ProviderMeta(id="faketest", name="假平台", short="假", status="stable")
 
-    def __init__(self, courses=None, *, error: Exception | None = None, cookie: str = ""):
-        super().__init__(AccountConfig(platform="faketest", cookie=cookie))
+    def __init__(
+        self,
+        courses=None,
+        *,
+        error: Exception | None = None,
+        cookie: str = "",
+        settings: HttpSettings | None = None,
+    ):
+        super().__init__(AccountConfig(platform="faketest", cookie=cookie), settings)
         self._courses = courses or []
         self._error = error
 

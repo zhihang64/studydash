@@ -25,7 +25,15 @@ from studydash.providers import (
 )
 from studydash.http import validate_query_endpoints
 
-BUILTIN = {"chaoxing", "icourse163", "educoder", "zhihuishu", "manual", "demo"}
+BUILTIN = {
+    "chaoxing",
+    "chaoxing_stat",
+    "icourse163",
+    "educoder",
+    "zhihuishu",
+    "manual",
+    "demo",
+}
 VALID_STATUS = {"stable", "beta", "unverified", "broken", "planned"}
 
 

@@ -25,6 +25,7 @@ from .base import (  # noqa: F401 - 对外统一从这里导出
     REGISTRY,
     RedirectedError,
     STATUS_LABEL,
+    map_concurrent,
     register,
 )
 
@@ -44,6 +45,7 @@ __all__ = [
     "AuthError",
     "RedirectedError",
     "STATUS_LABEL",
+    "map_concurrent",
     "ENTRY_POINT_GROUP",
 ]
 
@@ -151,6 +153,7 @@ def ids() -> Iterable[str]:
 # sys.modules 里，不会重复注册），打包后注册表也是满的。
 from . import (  # noqa: E402,F401
     chaoxing,
+    chaoxing_stat,
     demo,
     icourse163,
     manual,
