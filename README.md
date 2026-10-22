@@ -1,5 +1,9 @@
 # studydash · 学习进度聚合看板
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-3776AB.svg)](https://www.python.org/) [![Runtime deps](https://img.shields.io/badge/runtime%20deps-none-success.svg)](pyproject.toml) [![Version](https://img.shields.io/badge/version-3.0.0-informational.svg)](CHANGELOG.md)
+
+> 多平台学习进度聚合看板 · 只读 · 本地运行 · 运行时零第三方依赖
+
 把**不同平台**的学习进度、作业与截止时间读出来，聚合成一个本地页面。
 
 课程散在超星、中国大学 MOOC、智慧树，作业又散在各自的公告和作业页里——这门课
@@ -24,6 +28,30 @@
 
 ---
 
+## 目录
+
+- [这是什么，不是什么](#这是什么不是什么)
+- [快速开始](#快速开始)
+- [网页版（推荐）](#网页版推荐)
+- [写操作（实验性，只对超星）](#写操作实验性只对超星)
+  - [上报任务点（音视频 / 阅读 / 文档 / 图书 / 直播）](#上报任务点音视频--阅读--文档--图书--直播)
+  - [章节测验自动答题 / 刷学习次数](#章节测验自动答题--刷学习次数)
+- [接上你自己的账号](#接上你自己的账号)
+- [命令](#命令)
+- [看板能看到什么](#看板能看到什么)
+- [数据结构与契约](#数据结构与契约)
+- [写一个适配器](#写一个适配器)
+- [设计取舍](#设计取舍)
+- [打包](#打包)
+- [测试](#测试)
+- [版本与发布](#版本与发布)
+- [已知限制](#已知限制)
+- [隐私](#隐私)
+- [相关文档](#相关文档)
+- [License](#license)
+
+---
+
 ## 这是什么，不是什么
 
 **是**：一个只读的进度聚合器。它替你「看」，不替你「做」。唯一的例外是
@@ -43,19 +71,22 @@
   **地址**判定：地址里出现 `submit` / `save` / `answer` / `commit` / `upload` /
   `create` / `delete` / `update` / `modify` / `doWork` / `finish` / `report` /
   `sign` / `checkin` / `signin` 这类写动作词，直接拒绝。
-- 代码里**不存在**提交作业、交卷、答题、签到这类调用。
-- **唯一的写入例外是 `studydash writeback --apply`**（实验性，只对超星）。它把任务点
-  （音视频播放位置、阅读、文档、图书、直播时长）上报给平台，所以被单独隔离在
-  `src/studydash/writeback.py` 里：不加 `--apply`
-  一律只演练、一个请求都不发；上报地址钉死在常量里，别的地址拒发；它不出现在
-  `fetch` / `all` / `web` 的任何调用链里，只在你亲手敲命令时运行；网络出口仍然是
-  `http.py`，没有第二个 socket。
+- **只读链路里不存在任何写调用**：`providers/` 与 `http.py` 的写闸门保证抓取路径
+  永远不会提交作业、交卷、签到。
+- **写能力被隔离成三个独立模块，默认全部只演练**（见
+  [写操作](#写操作实验性只对超星)）：`writeback.py`（上报任务点）、
+  `quiz.py`（章节测验答题）、`learning.py`（刷学习次数）。三条硬规则：不加
+  `--apply` 一个请求都不发；上报/提交地址钉死在常量白名单里，别的地址拒发；它们
+  不出现在 `fetch` / `all` / `web` 的任何调用链里，只在你亲手触发时运行。网络出口
+  仍然只有一个 `http.py`，没有第二个 socket。
 - **不碰密码**。`studydash login` 开一个隔离浏览器窗口让你自己登录（扫码、验证码、
   二次验证都你自己过），它只从调试端口读登录后的 Cookie。账号密码它一个字符都看不到，
   也永远不会被写进任何文件。
 
-**不是**：不是刷课工具，不是自动签到/自动答题，不是代做。v1 时期这个仓库是
-超星单平台的看板；v2 重写为多平台聚合器，取的是「自己的进度自己看全」这一半。
+**不是**：不是自动签到工具，也不提供代做/代考。v1 时期这个仓库是超星单平台的
+看板；v2 重写为多平台聚合器，取的是「自己的进度自己看全」这一半；v3 之后补上了
+可选的写能力（上报任务点、章节测验答题、刷学习次数，见 `CHANGELOG.md` 的「未发布」），
+但默认是关闭的，要显式 `--apply` 或在页面上二次确认；签到、代做、批量注册仍然没有。
 
 ---
 
@@ -63,14 +94,14 @@
 
 ### 方式一：下载 exe（不用装 Python）
 
-从 [Releases](../../releases) 下载，**两个包选一个就行**：
+从 [Releases](https://github.com/zhihang64/studydash/releases) 下载，**两个包选一个就行**：
 
-  产物   说明  
-  ---   ---  
-  `studydash.exe`   单文件版，下载即用，约 9 MB。首次启动要解包，慢几秒  
-  `studydash-onedir.zip`   文件夹版，解压后用里面的 `studydash.exe`，启动更快、更不容易被杀软误报  
+| 产物 | 说明 |
+| --- | --- |
+| `studydash.exe` | 单文件版，下载即用，约 9 MB。首次启动要解包，慢几秒 |
+| `studydash-onedir.zip` | 文件夹版，解压后用里面的 `studydash.exe`，启动更快、更不容易被杀软误报 |
 
-> 想固定一个下载链接，用 [最新版直链](../../releases/latest)，文件名不带版本号，所以
+> 想固定一个下载链接，用 [最新版直链](https://github.com/zhihang64/studydash/releases/latest)，文件名不带版本号，所以
 > `…/releases/latest/download/studydash.exe` 一直有效。
 
 放进一个空文件夹**双击**即可：挑数据源 → 渲染 → 用默认浏览器打开看板，并在同目录生成：
@@ -131,14 +162,14 @@ studydash web --port 9000
 
 ### 五个页面
 
-  页面   干什么  
-  ---   ---  
-  **总览**   6 张 KPI、平台分布、最要紧的几件、进度告急的几门课；页头有「抓取数据」和「上报任务点」两个按钮  
-  **待办**   按 已逾期 / 3 天内 / 7 天内 / …… 分组的 DDL 时间轴，可按平台筛  
-  **课程**   搜索 + 排序 + 平台筛选；每门课带分项进度条和可展开的作业明细；超星课程卡右上角有「上报任务点」按钮（带范围与并发两个小下拉），点下去按钮下面就地显示上报进度条和成败  
-  **已隐藏课程**   从「课程」页进的二级页面：结课/不想再看的课藏在这里，可一键恢复  
-  **账号**   在页面里登录绑账号、启用/停用、删账号、单独抓某个平台、探测接口  
-  **设置**   深浅主题、抓取参数（超时/限速/重试/抓取并发）、提醒阈值、环境自检  
+| 页面 | 干什么 |
+| --- | --- |
+| **总览** | 6 张 KPI、平台分布、最要紧的几件、进度告急的几门课；页头有「抓取数据」和「上报任务点」两个按钮 |
+| **待办** | 按 已逾期 / 3 天内 / 7 天内 / …… 分组的 DDL 时间轴，可按平台筛 |
+| **课程** | 搜索 + 排序 + 平台筛选；每门课带分项进度条和可展开的作业明细；超星课程卡右上角有「上报任务点」按钮（带范围与并发两个小下拉），点下去按钮下面就地显示上报进度条和成败 |
+| **已隐藏课程** | 从「课程」页进的二级页面：结课/不想再看的课藏在这里，可一键恢复 |
+| **账号** | 在页面里登录绑账号、启用/停用、删账号、单独抓某个平台、探测接口 |
+| **设置** | 深浅主题、抓取参数（超时/限速/重试/抓取并发）、提醒阈值、环境自检 |
 
 「隐藏」是给已经结课、或者这学期不想再占位置的课程准备的：藏起来之后，它和它的
 作业不再出现在总览、待办和平台统计里，但**数据不会被删**——`progress.json` 仍是
@@ -181,7 +212,12 @@ Cookie 都能登。
 - 交互式 API 文档（`/docs`、`/openapi.json`）在网页版里是**关掉的**，免得把整张
   接口表摊在页面上。
 
-### 课程卡上的「上报任务点」按钮
+## 写操作（实验性，只对超星）
+
+下面两节是**本项目唯一的写能力**，和前面「只读聚合」是两条独立的路：默认全部只演练（一个请求都不发），必须显式 `--apply` 或在页面上二次确认才真的发。
+它们不在 `fetch` / `all` / `web` 的任何调用链里，只在你亲手触发时运行。
+
+### 上报任务点（音视频 / 阅读 / 文档 / 图书 / 直播）
 
 超星课程每张卡右上角有个按钮，就是这个项目**唯一会写平台数据**的入口——等价于 `studydash
 writeback`，但只作用于这一门课（前端传 `course_id`，后端按课程号锁死，不碰别的课）。
@@ -346,14 +382,14 @@ studydash login --source password --user 13800000000
 
 ### 六条取会话的路，挑一条走
 
-  来源   命令   什么时候用  
-  ---   ---   ---  
-  终端扫码   `studydash login`   **首选**。码画在终端里，手机扫一下就好  
-  账号密码   `studydash login --source password`   手上没手机、或想脚本化。密码不存、不进历史  
-  隔离窗口   `studydash login --source live`   想在自己熟悉的浏览器界面里登（扫码/验证码/二次验证都你自己过）。开一份独立配置档，**不用关**你日常的浏览器  
-  读日常配置档   `studydash login --source browser`   你已经在日常浏览器里登录好了。注意：**要先完全退出那个浏览器**（Chromium 对 Cookie 库持有独占锁，不是程序不给力）  
-  扩展/工具导出   `studydash login --file cookies.json`   浏览器换成不支持的新格式，或上面几种都不行。吃 Netscape `cookies.txt` 和常见扩展导出的 JSON  
-  手动粘贴   `studydash login --cookie "_uid=..."`   兜底。F12 → Network → 任一请求 → Request Headers → 整条 `Cookie`  
+| 来源 | 命令 | 什么时候用 |
+| --- | --- | --- |
+| 终端扫码 | `studydash login` | **首选**。码画在终端里，手机扫一下就好 |
+| 账号密码 | `studydash login --source password` | 手上没手机、或想脚本化。密码不存、不进历史 |
+| 隔离窗口 | `studydash login --source live` | 想在自己熟悉的浏览器界面里登（扫码/验证码/二次验证都你自己过）。开一份独立配置档，**不用关**你日常的浏览器 |
+| 读日常配置档 | `studydash login --source browser` | 你已经在日常浏览器里登录好了。注意：**要先完全退出那个浏览器**（Chromium 对 Cookie 库持有独占锁，不是程序不给力） |
+| 扩展/工具导出 | `studydash login --file cookies.json` | 浏览器换成不支持的新格式，或上面几种都不行。吃 Netscape `cookies.txt` 和常见扩展导出的 JSON |
+| 手动粘贴 | `studydash login --cookie "_uid=..."` | 兜底。F12 → Network → 任一请求 → Request Headers → 整条 `Cookie` |
 
 不管哪条路，都会**立刻验证**会话是否真的有效，不会把死 Cookie 写进配置然后让你自己发现。
 不想让它自动接着抓取，加 `--no-fetch`；只想存不想验证，加 `--no-check`。
@@ -404,7 +440,6 @@ studydash build --open    # 渲染 + 打开
 
 这几句话就能分清三种情况：Cookie 失效、账号确实没课、平台改版了。
 
-
 ### 中国大学 MOOC（课程 / 进度 / 作业已验证）
 
 扫码走的是 `icourse163.org` 自己的协议（`logonByQRCode`），和超星不是一套：
@@ -422,14 +457,13 @@ studydash login --platform icourse163 --source manual --cookie "NTESSTUDYSI=..."
 **账号密码登录还没做**（网易 URS 那条路会碰上验证码/二次验证），请用扫码或
 Cookie。课程数据走两个 RPC，2026-10-20 已用真实账号验证：
 
-  接口   取到什么  
-  ---   ---  
-  `learnerCourseRpcBean.getMyLearnedCoursePanelList.rpc`（`type=30`）   我的课程面板：MOOC + SPOC 全部课程、已学/总小节数  
-  `courseBean.getMocTermDto.rpc`（`termId`, `isDraft=0`, `excludeUnrelease=0`）   学期章节树，作业/测验/考试及其截止时间、得分  
+| 接口 | 取到什么 |
+| --- | --- |
+| `learnerCourseRpcBean.getMyLearnedCoursePanelList.rpc`（`type=30`） | 我的课程面板：MOOC + SPOC 全部课程、已学/总小节数 |
+| `courseBean.getMocTermDto.rpc`（`termId`, `isDraft=0`, `excludeUnrelease=0`） | 学期章节树，作业/测验/考试及其截止时间、得分 |
 
 两个坑：`csrfKey` 取的是 **`NTESSTUDYSI` Cookie 的值**（不是叫 `csrfKey` 的
 Cookie）；面板接口的参数是 `type`，传 `pageIndex` 会被 `-1007 不含有该参数` 顶回来。
-
 
 ### 头歌（课程 / 实训 + 图文作业已验证）
 
@@ -448,12 +482,12 @@ studydash login --platform educoder --source manual --cookie "_educoder_session=
 
 抓课程、任务和进度用的三个端点：
 
-  接口   取到什么  
-  ---   ---  
-  `/api/users/get_user_info.json`   当前登录用户。游客也会返回 200，只是 `login=""`、`username="游客"`  
-  `/api/courses/mine.json`   「我的课程」列表  
-  `/api/courses/{id}/homework_commons.json?type=4`   实训/作业：截止时间、任务点、已发布/已完成计数  
-  `/api/courses/{id}/homework_commons.json?type=1`   图文作业：截止时间、交没交  
+| 接口 | 取到什么 |
+| --- | --- |
+| `/api/users/get_user_info.json` | 当前登录用户。游客也会返回 200，只是 `login=""`、`username="游客"` |
+| `/api/courses/mine.json` | 「我的课程」列表 |
+| `/api/courses/{id}/homework_commons.json?type=4` | 实训/作业：截止时间、任务点、已发布/已完成计数 |
+| `/api/courses/{id}/homework_commons.json?type=1` | 图文作业：截止时间、交没交 |
 
 几个坑：① 课程列表接口对**游客也返回成功 + 空数组**，拿它判登录会把「会话过期」
 显示成「0 门课」，登录判据必须看 `get_user_info.json`；② 任务接口**默认只回
@@ -469,7 +503,6 @@ studydash login --platform educoder --source manual --cookie "_educoder_session=
 和 `/classrooms/{课程id}/common_homework/{作业id}/detail`。头歌页面自己给的
 `/shixuns/{identifier}/shixun_exec` 是「进入实战」的动作地址，直接打开会渲染成
 「404 您访问的页面已经离开地球」，别用它。
-
 
 ### 手动导入（最稳，推荐作为兜底）
 
@@ -503,15 +536,15 @@ unix 时间戳。
 
 ### 平台适配器状态
 
-  id   平台   状态   鉴权   说明  
-  ---   ---   ---   ---   ---  
-  `chaoxing`   超星学习通   stable   Cookie   课程、进度、章节剩余任务点、作业/待办已验证（2026-10-20）；逐条任务点清单为实验性  
-  `icourse163`   中国大学 MOOC   **beta**   扫码 / Cookie   课程、进度、作业/测验/考试已验证（2026-10-20）；成绩单与证书未接入  
-  `educoder`   头歌   **beta**   Cookie   课程、实训 + 图文作业、截止时间与完成状态已验证（2026-10-20）；登录走「独立窗口」或「读浏览器」，没有扫码/账号密码  
-  `zhihuishu`   智慧树   **未验证**   Cookie   同上  
-  `chaoxing_stat`   超星学习统计   **未验证**   Cookie   学习次数、累计观看时长、任务点明细（stat2-ans 这一路数据，`chaoxing` 拿不到）；复用超星 Cookie，移植自第三方工具 `chaoxing_tool` 的只读查询部分，接口未经真实账号验证  
-  `manual`   手动导入   stable   无   JSON / CSV，可给任意平台打标  
-  `demo`   离线演示   stable   无   内嵌样例，不联网  
+| id | 平台 | 状态 | 鉴权 | 说明 |
+| --- | --- | --- | --- | --- |
+| `chaoxing` | 超星学习通 | stable | Cookie | 课程、进度、章节剩余任务点、作业/待办已验证（2026-10-20）；逐条任务点清单为实验性 |
+| `icourse163` | 中国大学 MOOC | **beta** | 扫码 / Cookie | 课程、进度、作业/测验/考试已验证（2026-10-20）；成绩单与证书未接入 |
+| `educoder` | 头歌 | **beta** | Cookie | 课程、实训 + 图文作业、截止时间与完成状态已验证（2026-10-20）；登录走「独立窗口」或「读浏览器」，没有扫码/账号密码 |
+| `zhihuishu` | 智慧树 | **未验证** | Cookie | 同上 |
+| `chaoxing_stat` | 超星学习统计 | **未验证** | Cookie | 学习次数、累计观看时长、任务点明细（stat2-ans 这一路数据，`chaoxing` 拿不到）；复用超星 Cookie，移植自第三方工具 `chaoxing_tool` 的只读查询部分，接口未经真实账号验证 |
+| `manual` | 手动导入 | stable | 无 | JSON / CSV，可给任意平台打标 |
+| `demo` | 离线演示 | stable | 无 | 内嵌样例，不联网 |
 
 状态含义：
 
@@ -526,46 +559,48 @@ unix 时间戳。
 
 ## 命令
 
-  命令   作用  
-  ---   ---  
-  *（不带子命令）*   一键：有 Cookie 就抓、否则用已有数据或演示数据，渲染后打开浏览器  
-  **`login`**   **登录并把会话存起来**：默认**在终端画二维码**用手机扫；`--source password/live/browser/file/manual` 换来源；默认登录后直接抓取＋渲染＋打开  
-  `init`   生成 `config.json`（已有则不覆盖，要重建加 `--force`）  
-  `demo`   内置样例数据 → payload → 渲染  
-  `platforms`   列出所有适配器及其状态  
-  `probe [id]`   只读探测接口可用性，原始响应对应存到 `data/raw/`  
-  `fetch`   用配置里的 Cookie 抓取各平台  
-  `import FILE`   从 JSON / CSV 导入（`--init` 生成模板）  
-  `build`   `data/progress.json` → `out/dashboard.html`  
-  `open`   用默认浏览器打开已生成的看板  
-  `serve --port 8787`   本地起 http 服务预览  
-  `all [--demo]`   抓取（或 demo）+ 渲染  
-  `config`   打印配置（Cookie 已脱敏）  
-  `doctor`   自检：环境、工作区、模板、只读性扫描  
-  `writeback`   **把任务点补成已完成并上报给学习通**（实验性，只支持 `chaoxing`）。六类：音视频（签名上报播放位置）、阅读、文档、图书、直播。默认只演练，加 `--apply` 才真的发；`-k/--kind` 只做某一类（可重复），`--paced` 走「59 秒一段」逐段上报，`--limit N` 只做前 N 个，`--course` 按课名过滤，`-j/--workers N` 开 N 个线程并发上报（默认 1，`--paced` 时强制串行）  
-  `version`   版本与 payload schema 版本  
+| 命令 | 作用 |
+| --- | --- |
+| *（不带子命令）* | 一键：有 Cookie 就抓、否则用已有数据或演示数据，渲染后打开浏览器 |
+| **`login`** | **登录并把会话存起来**：默认**在终端画二维码**用手机扫；`--source password/live/browser/file/manual` 换来源；默认登录后直接抓取＋渲染＋打开 |
+| `init` | 生成 `config.json`（已有则不覆盖，要重建加 `--force`） |
+| `demo` | 内置样例数据 → payload → 渲染 |
+| `platforms` | 列出所有适配器及其状态 |
+| `probe [id]` | 只读探测接口可用性，原始响应对应存到 `data/raw/` |
+| `fetch` | 用配置里的 Cookie 抓取各平台 |
+| `import FILE` | 从 JSON / CSV 导入（`--init` 生成模板） |
+| `build` | `data/progress.json` → `out/dashboard.html` |
+| `open` | 用默认浏览器打开已生成的看板 |
+| `serve --port 8787` | 本地起 http 服务预览 |
+| `all [--demo]` | 抓取（或 demo）+ 渲染 |
+| `config` | 打印配置（Cookie 已脱敏） |
+| `doctor` | 自检：环境、工作区、模板、只读性扫描 |
+| `writeback` | **把任务点补成已完成并上报给学习通**（实验性，只支持 `chaoxing`）。六类：音视频（签名上报播放位置）、阅读、文档、图书、直播。默认只演练，加 `--apply` 才真的发；`-k/--kind` 只做某一类（可重复），`--paced` 走「59 秒一段」逐段上报，`--limit N` 只做前 N 个，`--course` 按课名过滤，`-j/--workers N` 开 N 个线程并发上报（默认 1，`--paced` 时强制串行） |
+| `quiz` | **章节测验自动答题**（实验性，只支持 `chaoxing`）。需要先在设置里填题库 token（言溪题库之类），`--cover-rate` 控制最低覆盖率，低于它只存不交；默认演练，`--apply` 才提交 |
+| `learning` | **刷章节学习次数**（实验性，只支持 `chaoxing`）。`--times N` 每章刷几轮，每轮走 `studentstudyAjax` → `setlog` 两跳并带心跳，默认演练 |
+| `version` | 版本与 payload schema 版本 |
 
 通用参数：`--home DIR` 指定工作区，`-v/--verbose`，`-q/--quiet`，`--version`。
 
 `login` 的完整参数：
 
-  参数   说明  
-  ---   ---  
-  `--source qr\ password\ live\ browser\ file\ manual`   会话来源，默认 `qr`（终端出二维码，手机扫）  
-  `--user NAME`   `--source password` 的账号，不填就现场问  
-  `--password-stdin`   `--source password` 从标准输入读一行当密码（给脚本用；**别用命令行参数传密码**，那会进 shell 历史）  
-  `--browser edge\ chrome`   `--source live/browser` 用哪个浏览器，默认 `edge`  
-  `--profile NAME`   指定配置档（`--source browser` 时用），默认取第一个  
-  `--file PATH`   `--source file` 时的 cookies.json / cookies.txt  
-  `--cookie TEXT`   `--source manual` 时的整条 Cookie  
-  `--platform ID`   存到哪个平台名下，默认 `chaoxing`  
-  `--label NAME`   存进 `config.json` 时的账号名，默认自动（`默认（uid）`）  
-  `--port N`   `--source live` 的调试端口，默认自动挑一个空闲的  
-  `--timeout N`   最多等多少秒（`qr` 默认 240，`live` 默认 300）  
-  `--no-check`   跳过会话验证（不推荐）  
-  `--no-save`   不写 `config.json`  
-  `--no-fetch`   存完就停，不接着抓取渲染  
-  `--open`   渲染完顺手打开浏览器  
+| 参数 | 说明 |
+| --- | --- |
+| `--source qr\ password\ live\ browser\ file\ manual` | 会话来源，默认 `qr`（终端出二维码，手机扫） |
+| `--user NAME` | `--source password` 的账号，不填就现场问 |
+| `--password-stdin` | `--source password` 从标准输入读一行当密码（给脚本用；**别用命令行参数传密码**，那会进 shell 历史） |
+| `--browser edge\ chrome` | `--source live/browser` 用哪个浏览器，默认 `edge` |
+| `--profile NAME` | 指定配置档（`--source browser` 时用），默认取第一个 |
+| `--file PATH` | `--source file` 时的 cookies.json / cookies.txt |
+| `--cookie TEXT` | `--source manual` 时的整条 Cookie |
+| `--platform ID` | 存到哪个平台名下，默认 `chaoxing` |
+| `--label NAME` | 存进 `config.json` 时的账号名，默认自动（`默认（uid）`） |
+| `--port N` | `--source live` 的调试端口，默认自动挑一个空闲的 |
+| `--timeout N` | 最多等多少秒（`qr` 默认 240，`live` 默认 300） |
+| `--no-check` | 跳过会话验证（不推荐） |
+| `--no-save` | 不写 `config.json` |
+| `--no-fetch` | 存完就停，不接着抓取渲染 |
+| `--open` | 渲染完顺手打开浏览器 |
 
 `probe` 输出的是**存档**（`data/raw/*.json` 里有请求记录与原始响应），用于平台改版时
 定位解析问题，不是用来绕过限制的。
@@ -629,7 +664,6 @@ my-university = "my_pkg.provider:CampusProvider"
 ```python
 from studydash.model import Assignment, Course, Progress
 from studydash.providers.base import Provider, ProviderMeta, register
-
 
 @register
 class CampusProvider(Provider):
@@ -740,9 +774,13 @@ pwsh -File tools\build_exe.ps1 -Mode onedir # 只出文件夹版
 ## 测试
 
 ```bash
-python -m pytest          # 532 passed / 3 skipped
-python -m ruff check .    # 可选：装了 lint 依赖
+python -m pytest --ignore=tests/test_web.py   # 626 passed / 2 skipped
+python -m pytest                               # 连网页版后端一起跑，需要 httpx
+python -m ruff check .                         # 可选：装了 lint 依赖
 ```
+
+`tests/test_web.py` 依赖 `httpx`（`starlette.testclient` 要求），只有装了 `[dev]` 才会跑；
+没装时它会在 collect 阶段报错，所以上面给了 `--ignore`。
 
 用例覆盖：数据模型与派生计算、HTML 解析器、只读网络层（含白名单拒绝路径）、
 工作区与配置脱敏、聚合的失败隔离、渲染转义、适配器注册表、CLI 子命令契约、
@@ -800,9 +838,21 @@ git push origin main v3.1.0
   `videoFaceCaptureEnc`、`playTime` 还是空的）能一次报满并立刻 `isPassed=true`；
   而像「石文化与宝玉石鉴赏」这种 88 个任务点全部带抓拍标记的课，自动化结果是 0/88，
   剩下只能手动看。死态的 `playTime` 平台不给回退，要课程方重置学习记录才能重来。
+
+  2026-10 全库实测（22 门课 / 1194 个视频任务点）：通过 286、未开始可刷 726、
+  带抓拍未看 56、**死态 125**。死态高度集中且与人脸抓拍强相关——
+  「石文化与宝玉石鉴赏」87/88 死态、「大数据统计分析基础」38/39 死态，两门课占掉 125 里的
+  全部，且这些死态节点的 `videoFaceCaptureEnc` **100% 非空**。对同一节点穷举过
+  `playing_time` 从 0 到满递增、`videoFaceCaptureEnc` 传原值/空串/不传、
+  `randomCaptureTime` 传 0/半程、`isdrag` 3/4、`--paced`、`--ramp` 等组合，全部
+  `isPassed:false` 且课程计数器不动；播放器页 19 个脚本里也搜不到任何「重置学习记录」
+  的接口（该能力在教师端）。结论：**死态只能由课程方在教师端重置，或换班级/重修后重来**；
+  重置后用 `writeback --apply --ramp --force` 可批量补完（`--force` 才能越过
+  带抓拍节点的 `skipped` 拦截）。
+
   `-j/--workers N` 能开 N 个线程同时上报多个任务点加速，代价是同一时刻有多个写请求
-  打到平台，要不要这么做自己衡量。第三方工具 `chaoxing_tool` 里除了上报以外的能力
-  （章节测验答题、账号密码登录、签到）**一律没有搬过来**。
+  打到平台，要不要这么做自己衡量。章节测验答题与刷学习次数已经作为独立模块实现
+  （见 [写操作](#写操作实验性只对超星)），签到没有。
 - **有两个适配器未验证**（`zhihuishu`、`chaoxing_stat`）。字段是照接口形状写的，可能对不上。
   看板会给它们挂提示，不会假装数据可信。欢迎拿 `probe` 的存档提 issue 修正。
 - **`chaoxing_stat`（超星学习统计）是 `chaoxing` 的补充数据源**，不是替代：它单独占一个
@@ -877,8 +927,18 @@ git push origin main v3.1.0
 一切都在本地：程序不向任何第三方服务器发送数据，也不上传你的进度。唯一的外部流量
 是去各平台读你自己的课程页面——和你自己打开浏览器看是同一件事。
 
+## 相关文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/handoff.md`](docs/handoff.md) | 交接文档：架构、模块职责、平台协议细节、踩过的坑与硬约束 |
+| [`docs/web-api.md`](docs/web-api.md) | 本地 HTTP API 契约（路由、请求体、SSE 事件、错误码） |
+| [`docs/payload.example.json`](docs/payload.example.json) | 看板 payload 带注释样例 |
+| [`docs/plugin.md`](docs/plugin.md) | 写一个适配器（provider 接口） |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更 |
+| [`config.example.json`](config.example.json) | 配置模板 |
+
 ## License
 
 [MIT](LICENSE)
-
 
