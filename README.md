@@ -792,7 +792,7 @@ python -m ruff check .                         # 可选：装了 lint 依赖
 
 ## 版本与发布
 
-当前版本 **v3.0.0**，更新内容见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **v3.1.0**，更新内容见 [CHANGELOG.md](CHANGELOG.md)。
 
 **版本号只有一处源头**：`src/studydash/__init__.py` 的 `__version__`。
 `pyproject.toml` 动态读它，前端 `web/package.json` 与 exe 的 Windows 版本资源都由

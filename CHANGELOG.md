@@ -5,6 +5,11 @@
 
 ## [未发布]
 
+## [3.1.0] - 2026-10-22
+
+> 本版是 v2.2.0 之后的第一个正式发布，`3.0.0` 段的内容（多平台聚合器重写）
+> 之前只存在于仓库里、没有单独发版，本次一并发布。
+
 ### 新增
 
 - `writeback` 上报完自动同步看板：新增 `aggregate.sync_payload()`，用刚活读的
@@ -215,7 +220,7 @@
 - MOOC 适配器升为 `beta`：课程、进度、作业/测验/考试已验证，成绩单与证书还没接。
 - 头歌适配器标 `beta`：课程、实训、图文作业已验证；登录态自检同样只发带签名的 GET。
 
-## [3.0.0] - 2026-10-19
+## [3.0.0] - 2026-10-19（未单独发版，内容并入 3.1.0）
 
 **从「命令行工具」变成「打开就能用的本地网页应用」**：v3 的主界面是一个只跑在本机的
 网页版——浏览器里扫码登录、刷新数据、管账号、看五个页面。命令行的能力一个没少，
@@ -535,7 +540,7 @@ v2.1.0 的登录要你切到一个新开的浏览器窗口里去完成，使用�
 - 课程列表页通常只给总进度百分比，不给分项任务点数与截止时间；
   截止时间线需要在 `config.json` 的 `deadlines` 里手工登记。
 
-[3.0.0]: https://github.com/zhihang64/studydash/releases/tag/v3.0.0
+[3.1.0]: https://github.com/zhihang64/studydash/releases/tag/v3.1.0
 [2.2.0]: https://github.com/zhihang64/studydash/releases/tag/v2.2.0
 [2.1.0]: https://github.com/zhihang64/studydash/releases/tag/v2.1.0
 [2.0.0]: https://github.com/zhihang64/studydash/releases/tag/v2.0.0
