@@ -160,8 +160,11 @@ jobs:
             双击运行时若没找到 `config.json`，会自动用内置演示数据渲染一份看板并在浏览器里打开，
             先把界面看清楚；要接真实数据再跑 `studydash init` 填 Cookie。
 
-            > 只读工具：它只把数据读出来看，不交作业、不刷视频、不替你点任何按钮。
-            > 想用命令行版：`pip install git+https://github.com/zhihang64/studydash`（尚未发布到 PyPI）。
+            **默认只读**：抓取、看板、导出都只读平台数据，一个写请求都不发。
+
+            写操作（补任务点、章节测验答题、刷学习次数）是 v3.1 起的实验性能力，只对超星生效，
+            必须显式 `--apply` 或在网页上二次确认才会真的发出请求；命令行版：
+            `pip install git+https://github.com/zhihang64/studydash`（尚未发布到 PyPI）。
           generate_release_notes: true
           files: |
             dist/studydash.exe
